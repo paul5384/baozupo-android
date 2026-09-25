@@ -33,7 +33,7 @@ class KivyRecipe(PyProjectRecipe):
     url = 'https://github.com/kivy/kivy/archive/{version}.zip'
     name = 'kivy'
 
-    depends = [('sdl2', 'sdl3'), 'pyjnius', 'setuptools', 'android', 'libthorvg']
+    depends = [('sdl2', 'sdl3'), 'pyjnius', 'setuptools', 'android']
     hostpython_prerequisites = ["cython>=0.29.1,<=3.0.12"]
 
     # sdl-gl-swapwindow-nogil.patch is needed to avoid a deadlock.
@@ -69,12 +69,13 @@ class KivyRecipe(PyProjectRecipe):
         if not is_kivy_less_than_3(self, arch):
             env['KIVY_CROSS_PLATFORM'] = 'android'
 
-        # thorvg headers
-        env['KIVY_THORVG_LIB_DIR'] = self.ctx.get_libs_dir(arch.arch)
-        env['KIVY_THORVG_INCLUDE_DIR'] = join(
-            Recipe.get_recipe('libthorvg', self.ctx).get_include_dir(arch),
-            'thorvg-1'
-        )
+        # thorvg headers (only needed by Kivy >= 3.0)
+        if not is_kivy_less_than_3(self, arch):
+            env['KIVY_THORVG_LIB_DIR'] = self.ctx.get_libs_dir(arch.arch)
+            env['KIVY_THORVG_INCLUDE_DIR'] = join(
+                Recipe.get_recipe('libthorvg', self.ctx).get_include_dir(arch),
+                'thorvg-1'
+            )
 
         if 'sdl2' in self.ctx.recipe_build_order:
             env['USE_SDL2'] = '1'
