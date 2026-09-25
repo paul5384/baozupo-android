@@ -42,7 +42,26 @@ jobs:
           open(p,'w',encoding='utf-8').write(s)
           print('已清除本地路径行，使用容器内置 SDK/NDK')
           PY
-          yes | buildozer -v android debug
+          set -o pipefail
+          yes | buildozer -v android debug 2>&1 | tee build.log
+
+      - name: 提取失败日志（小文件，便于传回本地）
+        if: failure()
+        run: |
+          tail -n 500 build.log > fail_tail.txt || true
+          grep -n -i -E "error|exception|traceback|failed" build.log | head -n 80 > fail_hits.txt || true
+          ls -l fail_tail.txt fail_hits.txt || true
+
+      - name: 上传失败日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fail-log
+          path: |
+            fail_tail.txt
+            fail_hits.txt
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: 显示产物
         run: ls -lh bin/ || true
