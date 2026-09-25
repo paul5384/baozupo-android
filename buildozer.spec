@@ -33,8 +33,9 @@ presplash.color = #2F4F4F
 #   配合 READ/WRITE_EXTERNAL_STORAGE 权限，APK 才能直接读写手机里的
 #   /sdcard/Download 目录，从而「导出备份 → 传到电脑 → 电脑版导入」。
 #   如果你要上架 Google Play，需要把 android.api 提到 34 并改用应用私有目录。
-android.api = 29
+android.api = 34
 android.minapi = 24
+android.accept_license = yes
 android.ndk = 25b
 
 # 使用本机已下载好的 SDK / NDK / JDK，避免 buildozer 联网重复下载
