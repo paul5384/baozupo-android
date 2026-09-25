@@ -42,16 +42,18 @@ jobs:
           open(p,'w',encoding='utf-8').write(s)
           print('已清除本地路径行，使用容器内置 SDK/NDK')
           PY
-          # 注意：yes 进程会被 SIGPIPE 杀掉(141)，不能用 pipefail 整体判定，
-          # 只取 PIPESTATUS[1]（buildozer 自己的退出码）
+          # 判定成败不看退出码（yes 会被 SIGPIPE 杀成 141，PIPESTATUS 取值也不可靠），
+          # 直接以 bin 下是否产出 APK 为准
           set +o pipefail
+          set +e
           yes | buildozer -v android debug 2>&1 | tee build.log
-          st=${PIPESTATUS[1]}
-          echo "buildozer exit code = $st"
-          if [ "$st" -ne 0 ]; then
-            echo "::error::buildozer failed with exit $st"
+          echo "--- bin 目录内容 ---"
+          ls -lh bin/ 2>&1 | tail -n 20
+          if ! ls bin/*.apk >/dev/null 2>&1; then
+            echo "::error::no APK produced in bin/"
             exit 1
           fi
+          echo "APK 已生成，打包成功"
 
       - name: 提取失败日志（小文件，便于传回本地）
         if: failure()
