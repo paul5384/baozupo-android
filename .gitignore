@@ -1,0 +1,16 @@
+# 构建产物
+.buildozer/
+bin/
+__pycache__/
+*.pyc
+*.pyo
+
+# 开发用日志/截图（不入库）
+run.log
+shot.log
+shot_*.png
+_preview_shot.py
+
+# 系统
+.DS_Store
+Thumbs.db

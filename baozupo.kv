@@ -1,0 +1,641 @@
+# ==============================================================================
+# 包租婆出租屋管家 · 安卓版 —— 界面布局
+# 配色与电脑版保持一致：墨绿 #2F4F4F / 草绿 #4A7C59
+# 注意：App 启动时会用中文字体覆盖注册 Roboto，所以这里不要依赖 Kivy 自带字体
+# ==============================================================================
+
+#:set C_PRIMARY (0.184, 0.310, 0.310, 1)
+#:set C_ACCENT (0.290, 0.486, 0.349, 1)
+#:set C_BG (0.949, 0.960, 0.953, 1)
+#:set C_CARD (1, 1, 1, 1)
+#:set C_TEXT (0.133, 0.188, 0.180, 1)
+#:set C_MUTED (0.478, 0.545, 0.533, 1)
+#:set C_LINE (0.863, 0.886, 0.878, 1)
+#:set C_DANGER (0.753, 0.314, 0.302, 1)
+#:set C_INFO (0.243, 0.420, 0.478, 1)
+
+<Root>:
+    orientation: 'vertical'
+    canvas.before:
+        Color:
+            rgba: C_BG
+        Rectangle:
+            pos: self.pos
+            size: self.size
+    ScreenManager:
+        id: sm
+        LoginScreen:
+            name: 'login'
+        HomeScreen:
+            name: 'home'
+        HousesScreen:
+            name: 'houses'
+        TenantsScreen:
+            name: 'tenants'
+        MineScreen:
+            name: 'mine'
+    BottomNav:
+        id: nav
+
+
+# ============================== 底部导航 ==============================
+<BottomNav>:
+    orientation: 'horizontal'
+    size_hint_y: None
+    height: dp(56)
+    canvas.before:
+        Color:
+            rgba: 1, 1, 1, 1
+        Rectangle:
+            pos: self.pos
+            size: self.size
+        Color:
+            rgba: C_LINE
+        Rectangle:
+            pos: self.x, self.top - dp(1)
+            size: self.width, dp(1)
+    NavBtn:
+        text: '首页'
+        screen: 'home'
+    NavBtn:
+        text: '房屋'
+        screen: 'houses'
+    NavBtn:
+        text: '租客'
+        screen: 'tenants'
+    NavBtn:
+        text: '我的'
+        screen: 'mine'
+
+
+<NavBtn>:
+    orientation: 'vertical'
+    canvas.before:
+        Color:
+            rgba: C_ACCENT if root.active else (1, 1, 1, 1)
+        Rectangle:
+            pos: self.pos
+            size: self.size
+    Label:
+        text: root.text
+        font_size: sp(15)
+        color: (1, 1, 1, 1) if root.active else C_MUTED
+        halign: 'center'
+        valign: 'middle'
+        text_size: self.size
+
+
+# ============================== 通用小卡 ==============================
+<StatCard>:
+    orientation: 'vertical'
+    size_hint_y: None
+    height: dp(58)
+    canvas.before:
+        Color:
+            rgba: root.bg
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(8)]
+    Label:
+        text: root.value
+        font_size: sp(14)
+        color: 1, 1, 1, 1
+        halign: 'center'
+        valign: 'middle'
+        text_size: self.size
+    Label:
+        text: root.label
+        font_size: sp(9)
+        color: 0.91, 0.94, 0.94, 1
+        halign: 'center'
+        valign: 'middle'
+        text_size: self.size
+        size_hint_y: None
+        height: dp(15)
+
+
+<ColorRow>:
+    canvas.before:
+        Color:
+            rgba: root.bg
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(8)]
+
+
+# ============================== 登录 ==============================
+<LoginScreen>:
+    name: 'login'
+    BoxLayout:
+        orientation: 'vertical'
+        padding: dp(26)
+        spacing: dp(8)
+        Widget:
+            size_hint_y: None
+            height: dp(40)
+        Label:
+            text: '包租婆出租屋管家'
+            font_size: sp(25)
+            color: C_PRIMARY
+            size_hint_y: None
+            height: dp(46)
+        Label:
+            text: '安卓版 v' + app.version
+            font_size: sp(12)
+            color: C_MUTED
+            size_hint_y: None
+            height: dp(20)
+        Widget:
+            size_hint_y: None
+            height: dp(16)
+        TextInput:
+            id: user
+            hint_text: '账号'
+            multiline: False
+            size_hint_y: None
+            height: dp(46)
+            font_size: sp(15)
+            background_color: (1, 1, 1, 1)
+            foreground_color: C_TEXT
+            cursor_color: C_ACCENT
+            padding: dp(12), dp(12), dp(12), dp(12)
+        TextInput:
+            id: pwd
+            hint_text: '密码'
+            password: True
+            multiline: False
+            size_hint_y: None
+            height: dp(46)
+            font_size: sp(15)
+            background_color: (1, 1, 1, 1)
+            foreground_color: C_TEXT
+            cursor_color: C_ACCENT
+            padding: dp(12), dp(12), dp(12), dp(12)
+        Widget:
+            size_hint_y: None
+            height: dp(10)
+        Button:
+            text: '登 录'
+            size_hint_y: None
+            height: dp(48)
+            font_size: sp(16)
+            background_color: C_ACCENT
+            color: (1, 1, 1, 1)
+            on_release: app.do_login(user.text, pwd.text)
+        Button:
+            text: '注册新账号'
+            size_hint_y: None
+            height: dp(44)
+            font_size: sp(14)
+            background_color: C_INFO
+            color: (1, 1, 1, 1)
+            on_release: app.open_register()
+        Label:
+            id: hint
+            text: ''
+            font_size: sp(12)
+            color: C_MUTED
+            size_hint_y: None
+            height: dp(40)
+            halign: 'center'
+            valign: 'top'
+            text_size: self.size
+        Widget:
+
+
+# ============================== 首页 ==============================
+<HomeScreen>:
+    name: 'home'
+    BoxLayout:
+        orientation: 'vertical'
+        BoxLayout:
+            size_hint_y: None
+            height: dp(46)
+            padding: dp(12), 0
+            canvas.before:
+                Color:
+                    rgba: C_PRIMARY
+                Rectangle:
+                    pos: self.pos
+                    size: self.size
+            Label:
+                text: '实时统计'
+                font_size: sp(16)
+                color: (1, 1, 1, 1)
+                halign: 'left'
+                valign: 'middle'
+                text_size: self.size
+            Label:
+                text: '包租婆 · 出租屋管家'
+                font_size: sp(11)
+                color: 0.81, 0.88, 0.88, 1
+                halign: 'right'
+                valign: 'middle'
+                text_size: self.size
+        ScrollView:
+            do_scroll_x: False
+            BoxLayout:
+                id: body
+                orientation: 'vertical'
+                size_hint_y: None
+                height: self.minimum_height
+                padding: dp(10)
+                spacing: dp(8)
+
+
+# ============================== 房屋 ==============================
+<HousesScreen>:
+    name: 'houses'
+    BoxLayout:
+        orientation: 'vertical'
+        BoxLayout:
+            size_hint_y: None
+            height: dp(58)
+            padding: dp(8), dp(6)
+            spacing: dp(6)
+            TextInput:
+                id: search
+                hint_text: '搜房间号 / 地址 / 租客'
+                multiline: False
+                font_size: sp(13)
+                background_color: (1, 1, 1, 1)
+                foreground_color: C_TEXT
+                cursor_color: C_ACCENT
+                padding: dp(10), dp(12), dp(10), dp(12)
+                on_text_validate: app.refresh_houses()
+            Spinner:
+                id: filt
+                text: '全部'
+                values: ['全部', '已租', '空闲']
+                size_hint_x: None
+                width: dp(80)
+                font_size: sp(13)
+                color: C_TEXT
+                on_text: app.on_filter_change(self, self.text)
+            Button:
+                text: '＋新增'
+                size_hint_x: None
+                width: dp(72)
+                font_size: sp(13)
+                background_color: C_ACCENT
+                color: (1, 1, 1, 1)
+                on_release: app.open_house_form('add')
+        Label:
+            id: count
+            text: ''
+            font_size: sp(11)
+            color: C_MUTED
+            size_hint_y: None
+            height: dp(22)
+            padding: dp(12), 0
+            halign: 'left'
+            valign: 'middle'
+            text_size: self.size
+        RecycleView:
+            id: rv
+            viewclass: 'HouseCard'
+            RecycleBoxLayout:
+                default_size: None, dp(142)
+                default_size_hint: 1, None
+                size_hint_y: None
+                height: self.minimum_height
+                orientation: 'vertical'
+                spacing: dp(8)
+                padding: dp(8)
+
+
+<HouseCard>:
+    orientation: 'vertical'
+    size_hint_y: None
+    height: dp(142)
+    padding: dp(10)
+    spacing: dp(2)
+    canvas.before:
+        Color:
+            rgba: 0.90, 0.92, 0.91, 1
+        RoundedRectangle:
+            pos: self.x + dp(2), self.y - dp(2)
+            size: self.width - dp(4), self.height
+            radius: [dp(10)]
+        Color:
+            rgba: root.card_bg
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(10)]
+    BoxLayout:
+        size_hint_y: None
+        height: dp(24)
+        spacing: dp(6)
+        Label:
+            text: root.room + '   ' + root.address
+            font_size: sp(15)
+            color: C_TEXT
+            halign: 'left'
+            valign: 'middle'
+            text_size: self.size
+        Label:
+            text: root.status
+            font_size: sp(12)
+            color: root.tag_fg
+            size_hint_x: None
+            width: dp(52)
+            halign: 'center'
+            valign: 'middle'
+            text_size: self.size
+            canvas.before:
+                Color:
+                    rgba: root.tag_bg
+                RoundedRectangle:
+                    pos: self.pos
+                    size: self.size
+                    radius: [dp(9)]
+    Label:
+        text: root.line1
+        font_size: sp(11)
+        color: C_MUTED
+        size_hint_y: None
+        height: dp(18)
+        halign: 'left'
+        valign: 'middle'
+        text_size: self.size
+    Label:
+        text: root.line2
+        font_size: sp(12)
+        color: C_TEXT
+        size_hint_y: None
+        height: dp(18)
+        halign: 'left'
+        valign: 'middle'
+        text_size: self.size
+    Label:
+        text: root.line3
+        font_size: sp(11)
+        color: C_MUTED
+        size_hint_y: None
+        height: dp(18)
+        halign: 'left'
+        valign: 'middle'
+        text_size: self.size
+    BoxLayout:
+        size_hint_y: None
+        height: dp(34)
+        spacing: dp(5)
+        Button:
+            text: '租客'
+            font_size: sp(12)
+            background_color: C_ACCENT
+            color: (1, 1, 1, 1)
+            on_release: app.house_action('tenant', root.room)
+        Button:
+            text: '收租'
+            font_size: sp(12)
+            background_color: C_INFO
+            color: (1, 1, 1, 1)
+            on_release: app.house_action('pay', root.room)
+        Button:
+            text: '水电'
+            font_size: sp(12)
+            background_color: 0.541, 0.427, 0.231, 1
+            color: (1, 1, 1, 1)
+            on_release: app.house_action('util', root.room)
+        Button:
+            text: '更多'
+            font_size: sp(12)
+            background_color: 0.478, 0.545, 0.533, 1
+            color: (1, 1, 1, 1)
+            on_release: app.house_action('more', root.room)
+
+
+# ============================== 租客 ==============================
+<TenantsScreen>:
+    name: 'tenants'
+    BoxLayout:
+        orientation: 'vertical'
+        Label:
+            text: '租客列表'
+            font_size: sp(16)
+            color: (1, 1, 1, 1)
+            size_hint_y: None
+            height: dp(46)
+            padding: dp(12), 0
+            halign: 'left'
+            valign: 'middle'
+            text_size: self.size
+            canvas.before:
+                Color:
+                    rgba: C_PRIMARY
+                Rectangle:
+                    pos: self.pos
+                    size: self.size
+        Label:
+            id: count
+            text: ''
+            font_size: sp(11)
+            color: C_MUTED
+            size_hint_y: None
+            height: dp(24)
+            padding: dp(12), 0
+            halign: 'left'
+            valign: 'middle'
+            text_size: self.size
+        RecycleView:
+            id: rv
+            viewclass: 'TenantCard'
+            RecycleBoxLayout:
+                default_size: None, dp(96)
+                default_size_hint: 1, None
+                size_hint_y: None
+                height: self.minimum_height
+                orientation: 'vertical'
+                spacing: dp(8)
+                padding: dp(8)
+
+
+<TenantCard>:
+    orientation: 'vertical'
+    size_hint_y: None
+    height: dp(96)
+    padding: dp(10)
+    spacing: dp(2)
+    canvas.before:
+        Color:
+            rgba: 0.90, 0.92, 0.91, 1
+        RoundedRectangle:
+            pos: self.x + dp(2), self.y - dp(2)
+            size: self.width - dp(4), self.height
+            radius: [dp(10)]
+        Color:
+            rgba: 1, 1, 1, 1
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(10)]
+    BoxLayout:
+        size_hint_y: None
+        height: dp(26)
+        spacing: dp(6)
+        Label:
+            text: root.name
+            font_size: sp(15)
+            color: C_TEXT
+            halign: 'left'
+            valign: 'middle'
+            text_size: self.size
+        Label:
+            text: root.room
+            font_size: sp(13)
+            color: C_MUTED
+            size_hint_x: None
+            width: dp(70)
+            halign: 'right'
+            valign: 'middle'
+            text_size: self.size
+        Label:
+            text: root.tag
+            font_size: sp(12)
+            color: (1, 1, 1, 1)
+            size_hint_x: None
+            width: dp(52)
+            halign: 'center'
+            valign: 'middle'
+            text_size: self.size
+            canvas.before:
+                Color:
+                    rgba: root.tag_bg
+                RoundedRectangle:
+                    pos: self.pos
+                    size: self.size
+                    radius: [dp(9)]
+    Label:
+        text: root.line1
+        font_size: sp(12)
+        color: C_TEXT
+        size_hint_y: None
+        height: dp(20)
+        halign: 'left'
+        valign: 'middle'
+        text_size: self.size
+    Label:
+        text: root.line2
+        font_size: sp(11)
+        color: C_MUTED
+        size_hint_y: None
+        height: dp(20)
+        halign: 'left'
+        valign: 'middle'
+        text_size: self.size
+
+
+# ============================== 我的 ==============================
+<MineScreen>:
+    name: 'mine'
+    BoxLayout:
+        orientation: 'vertical'
+        Label:
+            text: '我的'
+            font_size: sp(16)
+            color: (1, 1, 1, 1)
+            size_hint_y: None
+            height: dp(46)
+            padding: dp(12), 0
+            halign: 'left'
+            valign: 'middle'
+            text_size: self.size
+            canvas.before:
+                Color:
+                    rgba: C_PRIMARY
+                Rectangle:
+                    pos: self.pos
+                    size: self.size
+        Label:
+            id: count
+            text: ''
+            font_size: sp(12)
+            color: C_MUTED
+            size_hint_y: None
+            height: dp(26)
+            padding: dp(12), 0
+            halign: 'left'
+            valign: 'middle'
+            text_size: self.size
+        BoxLayout:
+            size_hint_y: None
+            height: dp(40)
+            padding: dp(12), 0
+            spacing: dp(8)
+            Button:
+                text: '＋ 添加新房'
+                font_size: sp(14)
+                background_color: C_ACCENT
+                color: (1, 1, 1, 1)
+                on_release: app.open_house_form('add')
+            Button:
+                text: '全局提醒设置'
+                font_size: sp(14)
+                background_color: C_INFO
+                color: (1, 1, 1, 1)
+                on_release: app.open_warn_setting()
+        Widget:
+            size_hint_y: None
+            height: dp(8)
+        ScrollView:
+            do_scroll_x: False
+            BoxLayout:
+                orientation: 'vertical'
+                size_hint_y: None
+                height: self.minimum_height
+                padding: dp(12)
+                spacing: dp(8)
+                Button:
+                    text: '导出备份 / 导入数据'
+                    size_hint_y: None
+                    height: dp(48)
+                    font_size: sp(15)
+                    background_color: C_ACCENT
+                    color: (1, 1, 1, 1)
+                    on_release: app.open_backup_menu()
+                Button:
+                    text: '修改密码'
+                    size_hint_y: None
+                    height: dp(48)
+                    font_size: sp(15)
+                    background_color: C_INFO
+                    color: (1, 1, 1, 1)
+                    on_release: app.open_change_pwd()
+                Button:
+                    text: '清空所有业务数据'
+                    size_hint_y: None
+                    height: dp(48)
+                    font_size: sp(15)
+                    background_color: C_DANGER
+                    color: (1, 1, 1, 1)
+                    on_release: app.clear_data()
+                Button:
+                    text: '退出登录'
+                    size_hint_y: None
+                    height: dp(48)
+                    font_size: sp(15)
+                    background_color: 0.478, 0.545, 0.533, 1
+                    color: (1, 1, 1, 1)
+                    on_release: app.logout()
+                Button:
+                    text: '关于本软件'
+                    size_hint_y: None
+                    height: dp(48)
+                    font_size: sp(15)
+                    background_color: 0.478, 0.545, 0.533, 1
+                    color: (1, 1, 1, 1)
+                    on_release: app.about()
+                Label:
+                    id: info
+                    text: ''
+                    font_size: sp(11)
+                    color: C_MUTED
+                    size_hint_y: None
+                    height: dp(80)
+                    halign: 'left'
+                    valign: 'top'
+                    text_size: self.size

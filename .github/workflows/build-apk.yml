@@ -1,0 +1,63 @@
+name: 打包安卓APK
+
+# 在 GitHub 网页上点一下就能出 APK，不需要在电脑上装任何安卓环境
+# 用法：把「手机App版」里的文件推到 GitHub 仓库 → Actions → 选本工作流 → Run workflow
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装系统依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq git zip unzip openjdk-17-jdk autoconf automake \
+            libtool pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev \
+            cmake libffi-dev libssl-dev
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装 buildozer
+        run: |
+          python -m pip install --upgrade pip
+          pip install buildozer
+          # 如果打包时报 Cython 相关错误，把上面一行换成：
+          # pip install buildozer "cython==0.29.36"
+
+      - name: 缓存 Android SDK / NDK（第一次约 40 分钟，之后 5 分钟左右）
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.buildozer
+            ~/.gradle
+          key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          restore-keys: |
+            buildozer-${{ runner.os }}-
+
+      - name: 开始打包
+        run: |
+          export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+          export ANDROID_HOME="$HOME/.buildozer/android/platform/android-sdk"
+          yes | buildozer -v android debug
+
+      - name: 显示产物
+        run: ls -lh bin/
+
+      - name: 上传 APK（在页面底部 Artifacts 里下载）
+        uses: actions/upload-artifact@v4
+        with:
+          name: 包租婆APK
+          path: bin/*.apk
+          if-no-files-found: error
+          retention-days: 30
