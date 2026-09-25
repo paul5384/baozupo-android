@@ -43,6 +43,10 @@ android.ndk_path = C:/Users/L540/android-build/android-ndk/android-ndk-r25b
 java.home = C:/Users/L540/android-build/jdk
 # 同时出 64 位和 32 位，兼容新老手机（只想要 64 位可以删掉 armeabi-v7a，包会小一半）
 android.archs = arm64-v8a
+# 本地 recipe 覆盖：recipes/kivy/__init__.py 去掉了 python_depends，
+# 避免 p4a 给 APK 强塞 requests/charset-normalizer 等（2026-09 其 android wheel
+# 会触发 pip "not a supported wheel on this platform" 构建失败）
+p4a.local_recipes = ./recipes
 android.permissions = READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE, INTERNET
 
 android.allow_backup = True
