@@ -42,17 +42,26 @@ jobs:
           open(p,'w',encoding='utf-8').write(s)
           print('已清除本地路径行，使用容器内置 SDK/NDK')
           PY
-          set -o pipefail
+          # 注意：yes 进程会被 SIGPIPE 杀掉(141)，不能用 pipefail 整体判定，
+          # 只取 PIPESTATUS[1]（buildozer 自己的退出码）
+          set +o pipefail
           yes | buildozer -v android debug 2>&1 | tee build.log
+          st=${PIPESTATUS[1]}
+          echo "buildozer exit code = $st"
+          if [ "$st" -ne 0 ]; then
+            echo "::error::buildozer failed with exit $st"
+            exit 1
+          fi
 
       - name: 提取失败日志（小文件，便于传回本地）
         if: failure()
         run: |
-          tail -n 500 build.log > fail_tail.txt || true
-          grep -n -i -E "error|exception|traceback|failed" build.log | head -n 80 > fail_hits.txt || true
+          tail -n 400 build.log > fail_tail.txt || true
+          grep -n -i -E "error|exception|traceback|failed|cannot find" build.log \
+            | grep -v -E "Werror|gcc -c|_validate_pyproject" | head -n 60 > fail_hits.txt || true
           ls -l fail_tail.txt fail_hits.txt || true
 
-      - name: 上传失败日志
+      - name: 上传失败日志（ASCII 名，避免编码问题）
         if: failure()
         uses: actions/upload-artifact@v4
         with:
@@ -69,7 +78,7 @@ jobs:
       - name: 上传 APK（在页面底部 Artifacts 里下载）
         uses: actions/upload-artifact@v4
         with:
-          name: 包租婆APK
+          name: baozupo-apk
           path: bin/*.apk
           if-no-files-found: error
           retention-days: 30
