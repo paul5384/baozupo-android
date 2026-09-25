@@ -36,6 +36,11 @@ presplash.color = #2F4F4F
 android.api = 29
 android.minapi = 24
 android.ndk = 25b
+
+# 使用本机已下载好的 SDK / NDK / JDK，避免 buildozer 联网重复下载
+android.sdk_path = C:/Users/L540/android-build/android-sdk
+android.ndk_path = C:/Users/L540/android-build/android-ndk/android-ndk-r25b
+java.home = C:/Users/L540/android-build/jdk
 # 同时出 64 位和 32 位，兼容新老手机（只想要 64 位可以删掉 armeabi-v7a，包会小一半）
 android.archs = arm64-v8a, armeabi-v7a
 android.permissions = READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE, INTERNET
