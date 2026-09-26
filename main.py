@@ -18,6 +18,161 @@ import json
 import traceback
 from datetime import datetime, timedelta
 
+# ==============================================================================
+# 【诊断引导块 A】—— 在任何 Kivy 代码之前建立日志 / 阶段记录 / 崩溃逃生通道
+# 目的：定位"显示启动图后闪退"。不依赖数据线，靠三条通道把信息送出来：
+#   1) 手机剪贴板（每次阶段推进都刷新，你粘贴出来即可）
+#   2) 文件（应用外部私有目录 / 内部私有目录 / sdcard）
+#   3) 崩溃时弹一个错误界面（截图即可）
+# 问题定位后，把「诊断引导块 A/B/C」三块整段删除即可恢复干净版本。
+# ==============================================================================
+DIAG_VERSION = "2.1.1-diag"
+_DIAG_LINES = []
+_DIAG_FILES = []
+_DIAG_STAGE = "S0 脚本开始执行"
+
+
+def _diag_collect_paths():
+    """列出所有可能可写的日志路径（按成功率排序）"""
+    out = []
+    for env in ("ANDROID_PRIVATE", "ANDROID_ARGUMENT"):
+        try:
+            p = os.environ.get(env)
+            if p and os.path.isdir(p):
+                out.append(os.path.join(p, "baozupo_log.txt"))
+        except Exception:
+            pass
+    try:
+        from jnius import autoclass
+        act = autoclass("org.kivy.android.PythonActivity").mActivity
+        d = act.getExternalFilesDir(None)
+        if d is not None:
+            out.append(os.path.join(d.getAbsolutePath(), "baozupo_log.txt"))
+    except Exception:
+        pass
+    for d in ("/sdcard/Download", "/storage/emulated/0/Download", "/sdcard"):
+        try:
+            if os.path.isdir(d):
+                out.append(os.path.join(d, "baozupo_log.txt"))
+        except Exception:
+            pass
+    try:
+        out.append(os.path.join(os.path.expanduser("~"), "baozupo_log.txt"))
+    except Exception:
+        pass
+    uniq = []
+    for p in out:
+        if p not in uniq:
+            uniq.append(p)
+    return uniq
+
+
+def _diag_write(text):
+    """写一行日志：内存 + 所有可写文件"""
+    try:
+        _DIAG_LINES.append(text)
+        if len(_DIAG_LINES) > 400:
+            del _DIAG_LINES[:100]
+    except Exception:
+        pass
+    for path in _DIAG_FILES:
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(text + "\n")
+        except Exception:
+            pass
+
+
+def _diag_init_log():
+    """逐个尝试打开日志文件，第一个成功的作为主日志"""
+    for p in _diag_collect_paths():
+        try:
+            d = os.path.dirname(p)
+            if d and not os.path.isdir(d):
+                os.makedirs(d, exist_ok=True)
+            with open(p, "a", encoding="utf-8") as f:
+                f.write("\n\n########## %s 启动 %s ##########\n"
+                        % (DIAG_VERSION, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            _DIAG_FILES.append(p)
+        except Exception:
+            continue
+    _diag_write("日志文件候选: %s" % (_DIAG_FILES or "全部不可写"))
+
+
+def _diag_clip(text):
+    """把文本放进系统剪贴板（安卓）。任何失败都静默忽略。"""
+    try:
+        from jnius import autoclass, cast
+        activity = autoclass("org.kivy.android.PythonActivity").mActivity
+        Context = autoclass("android.content.Context")
+        cm = cast("android.content.ClipboardManager",
+                  activity.getSystemService(Context.CLIPBOARD_SERVICE))
+        ClipData = autoclass("android.content.ClipData")
+        cm.setPrimaryClip(ClipData.newPlainText("baozupo-diag", text))
+        return True
+    except Exception:
+        return False
+
+
+def _diag_report(stage, extra=""):
+    """记录阶段：写日志 + 刷新剪贴板（剪贴板里永远保留『最后到达阶段』）"""
+    global _DIAG_STAGE
+    _DIAG_STAGE = stage
+    _diag_write("[阶段] %s %s" % (stage, extra))
+    tail = "\n".join(_DIAG_LINES[-25:])
+    _diag_clip("【包租婆诊断 %s】\n最后到达阶段: %s\n\n----- 日志尾部 -----\n%s\n"
+               "------------------\n(完整日志: %s)"
+               % (DIAG_VERSION, stage, tail, (_DIAG_FILES[0] if _DIAG_FILES else "无")))
+
+
+def _diag_env_dump():
+    """环境信息：出问题时用来判断是不是版本/机型/权限相关"""
+    info = []
+    try:
+        info.append("python: %s" % sys.version.replace("\n", " "))
+    except Exception:
+        pass
+    try:
+        import platform as _pf
+        info.append("machine: %s" % _pf.machine())
+        info.append("release: %s" % _pf.release())
+        info.append("android_ver: %s" % os.environ.get("ANDROID_ARGUMENT", ""))
+    except Exception:
+        pass
+    try:
+        info.append("sys.path: %s" % sys.path[:6])
+    except Exception:
+        pass
+    try:
+        ap = os.environ.get("ANDROID_PRIVATE", "")
+        info.append("ANDROID_PRIVATE: %s" % ap)
+        if ap and os.path.isdir(ap):
+            info.append("private dir 内容: %s" % sorted(os.listdir(ap))[:30])
+    except Exception as e:
+        info.append("private dir 读取失败: %r" % (e,))
+    try:
+        info.append("BASE_DIR: %s" % _diag_base_dir())
+    except Exception:
+        pass
+    for line in info:
+        _diag_write("  " + str(line))
+
+
+def _diag_base_dir():
+    try:
+        return os.path.dirname(os.path.abspath(__file__))
+    except Exception:
+        return "?"
+
+
+_diag_init_log()
+_diag_write("=" * 60)
+_diag_write("诊断版启动 %s" % DIAG_VERSION)
+_diag_env_dump()
+_diag_report("S0 诊断块初始化完成")
+_diag_report("S1 开始导入 Kivy")
+
+
 from kivy.app import App
 from kivy.lang import Builder
 from kivy.metrics import dp, sp
@@ -42,6 +197,13 @@ from kivy.uix.recycleview import RecycleView
 from kivy.uix.recycleview.views import RecycleDataViewBehavior
 from kivy.uix.behaviors import ButtonBehavior
 from kivy.uix.widget import Widget
+
+# ---- 诊断引导块 B：Kivy 导入成功 ----
+try:
+    import kivy as _kivy_mod
+    _diag_report("S2 Kivy 导入成功", "kivy=%s" % getattr(_kivy_mod, "__version__", "?"))
+except Exception as _e:
+    _diag_report("S2 Kivy 导入异常", repr(_e))
 
 # ==============================================================================
 # 一、基础信息与主题色
@@ -100,6 +262,8 @@ def register_cjk_font():
 
 
 FONT_PATH = register_cjk_font()
+# ---- 诊断：字体是否找到（找不到只会显示方框，不会闪退，但一并记录）----
+_diag_report("S3 中文字体注册", "FONT_PATH=%s" % (FONT_PATH or "未找到"))
 
 # ==============================================================================
 # 三、存储目录
@@ -145,6 +309,7 @@ def public_dirs():
 
 
 DATA_FILE = os.path.join(app_data_dir(), "baozupo_data.json")
+_diag_report("S4 数据目录就绪", "DATA_FILE=%s" % DATA_FILE)
 
 # ==============================================================================
 # 四、数据层
@@ -616,9 +781,11 @@ class BaozupoApp(App):
         return
 
     def build(self):
+        _diag_report("S5 进入 build()")
         self.title = APP_NAME
         self.store = Store()
         first = self.store.ensure_default_user()
+        _diag_report("S5.1 数据层初始化完成")
         if platform == "android":
             try:
                 Window.softinput_mode = "below_target"
@@ -626,8 +793,11 @@ class BaozupoApp(App):
                 pass
 
         if not os.path.exists(KV_FILE):
+            _diag_report("S5.2 缺少 kv 文件", KV_FILE)
             return Label(text="缺少界面文件 baozupo.kv，\n请确认它和 main.py 在同一个目录里。")
+        _diag_report("S5.2 加载界面文件", KV_FILE)
         Builder.load_file(KV_FILE)
+        _diag_report("S5.3 界面文件解析完成")
 
         root = Root()                       # 规则已在上面注册，这里直接实例化即可
         self.root_widget = root
@@ -643,7 +813,11 @@ class BaozupoApp(App):
             self.set_login_hint("首次使用可先用 admin / 123456 登录，或点下方注册新账号")
         self._sync_nav()
         Window.bind(on_keyboard=self.on_hardware_back)
+        _diag_report("S6 UI 构建完成，返回根组件")
         return root
+
+    def on_start(self):
+        _diag_report("S7 应用已进入前台（on_start）")
 
     # ------------------------------------------------------------------ 导航
     def _sync_nav(self, *a):
@@ -1480,14 +1654,61 @@ class BaozupoApp(App):
     # ------------------------------------------------------------------ 异常兜底
     def handle_exception(self, inst, exc):
         try:
+            tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+            _diag_report("X 运行期异常（Kivy 捕获）", type(exc).__name__)
+            _diag_write(tb)
+            _diag_clip("【包租婆崩溃】%s\n\n%s" % (type(exc).__name__, tb[:1500]))
             with open(os.path.join(app_data_dir(), "error.log"), "a", encoding="utf-8") as f:
-                f.write("\n=== %s ===\n%s\n" % (now_str(), "".join(
-                    traceback.format_exception(type(exc), exc, exc.__traceback__))))
+                f.write("\n=== %s ===\n%s\n" % (now_str(), tb))
         except Exception:
             pass
         return False
 
 
 # ==============================================================================
+# 【诊断引导块 C】崩溃逃生界面：即使主程序起不来，也让错误看得见
+# ==============================================================================
+def _diag_show_crash(text):
+    """用最小代价的 Kivy 界面显示错误（可由用户长按复制 / 截图）"""
+    _diag_clip("【包租婆崩溃】\n" + text[-1500:])
+    try:
+        from kivy.base import runTouchApp
+        from kivy.uix.scrollview import ScrollView
+        from kivy.uix.textinput import TextInput
+        from kivy.core.text import LabelBase
+
+        try:
+            if FONT_PATH:
+                LabelBase.register(name="DiagFont", fn_regular=FONT_PATH)
+        except Exception:
+            pass
+
+        ti = TextInput(text=text[-6000:], readonly=True, font_size=sp(11))
+        try:
+            if FONT_PATH:
+                ti.font_name = "DiagFont"
+        except Exception:
+            pass
+        sv = ScrollView()
+        sv.add_widget(ti)
+        runTouchApp(sv)
+    except Exception as e2:
+        _diag_write("崩溃界面也起不来: %r" % (e2,))
+
+
 if __name__ == "__main__":
-    BaozupoApp().run()
+    _diag_report("S8 准备启动主程序")
+    try:
+        BaozupoApp().run()
+        _diag_report("S9 主程序正常退出")
+    except BaseException as e:
+        tb = traceback.format_exc()
+        try:
+            _diag_write("!!! 启动失败: %s" % tb)
+            _diag_report("S9 主程序异常退出", type(e).__name__)
+        except Exception:
+            pass
+        _diag_show_crash(
+            "包租婆 %s 启动失败\n\n阶段: %s\n\n%s\n\n日志文件:\n%s\n\n"
+            "请把本页截图，或长按复制内容发给开发者。"
+            % (DIAG_VERSION, _DIAG_STAGE, tb, "\n".join(_DIAG_FILES) or "（无法写入任何文件）"))
