@@ -30,6 +30,56 @@ jobs:
           restore-keys: |
             buildozer-container-
 
+      - name: 注入 16KB 页对齐（Android 15+ 的 16KB 页设备必需）
+        run: |
+          python3 - <<'PY'
+          import os, re, glob
+          FLAG = '-Wl,-z,max-page-size=16384'
+
+          base = None
+          try:
+              import pythonforandroid as p4a
+              base = os.path.dirname(p4a.__file__)
+          except Exception as e:
+              print('import p4a failed:', e)
+          if not base:
+              cand = glob.glob('/usr/lib/python3*/site-packages/pythonforandroid/archs.py') \
+                   + glob.glob('/usr/local/lib/python3*/site-packages/pythonforandroid/archs.py') \
+                   + glob.glob('/opt/**/pythonforandroid/archs.py', recursive=True)
+              base = os.path.dirname(cand[0]) if cand else None
+          print('p4a base:', base)
+          if not base:
+              raise SystemExit('cannot locate pythonforandroid')
+
+          # 1) 全局 LDFLAGS（autoconf/make 系 recipe 走这里）
+          ap = os.path.join(base, 'archs.py')
+          s = open(ap).read()
+          hits = []
+          def repl(m):
+              hits.append(m.group(0))
+              return m.group(0)[:-1] + ", '%s']" % FLAG
+          s2 = re.sub(r"common_ldflags\s*=\s*\[[^\]]*\]", repl, s)
+          if hits and FLAG not in s:
+              open(ap, 'w').write(s2)
+          print('archs.py common_ldflags patched:', len(hits), hits[:1])
+
+          # 2) ndk-build 系（SDL2 / bootstrap 的 libmain.so 走这里）
+          n = 0
+          for mk in glob.glob(os.path.join(base, '**', 'Application.mk'), recursive=True):
+              try:
+                  t = open(mk).read()
+                  if FLAG not in t:
+                      with open(mk, 'a') as f:
+                          f.write('\nAPP_LDFLAGS += %s\n' % FLAG)
+                      n += 1
+              except Exception as e:
+                  print('skip', mk, e)
+          print('Application.mk patched:', n)
+          PY
+          # 3) 新参数必须重编才生效：清掉已编译产物（保留 SDK/NDK 免重下）
+          rm -rf /root/.buildozer/android/platform/build /root/.buildozer/android/platform/build-*
+          echo "已清除 p4a 构建产物，本轮全量重编"
+
       - name: 开始打包
         run: |
           # 清除本机 Windows 路径行，使用容器内置的 SDK/NDK/JDK
@@ -76,6 +126,32 @@ jobs:
 
       - name: 显示产物
         run: ls -lh bin/ || true
+
+      - name: 校验 .so 页对齐（应全部为 0x4000）
+        run: |
+          python3 - <<'PY'
+          import zipfile, struct, glob
+          for apk in glob.glob('bin/*.apk'):
+              z = zipfile.ZipFile(apk)
+              print('==', apk)
+              for n in z.namelist():
+                  if not n.endswith('.so'):
+                      continue
+                  b = z.read(n)
+                  if b[:4] != b'\x7fELF':
+                      print('  %-42s (not ELF)' % n)
+                      continue
+                  phoff = struct.unpack_from('<Q', b, 0x20)[0]
+                  phentsize = struct.unpack_from('<H', b, 0x36)[0]
+                  phnum = struct.unpack_from('<H', b, 0x38)[0]
+                  al = []
+                  for i in range(phnum):
+                      off = phoff + i * phentsize
+                      if struct.unpack_from('<I', b, off)[0] == 1:
+                          al.append(struct.unpack_from('<Q', b, off + 0x30)[0])
+                  m = hex(max(al)) if al else '?'
+                  print('  %-42s %s %s' % (n, m, 'OK' if al and max(al) >= 0x4000 else '*** 4KB ***'))
+          PY
 
       - name: 上传 APK（在页面底部 Artifacts 里下载）
         uses: actions/upload-artifact@v4
