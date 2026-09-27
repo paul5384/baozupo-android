@@ -36,19 +36,45 @@ jobs:
           import os, re, glob
           FLAG = '-Wl,-z,max-page-size=16384'
 
-          base = None
-          try:
-              import pythonforandroid as p4a
-              base = os.path.dirname(p4a.__file__)
-          except Exception as e:
-              print('import p4a failed:', e)
-          if not base:
-              cand = glob.glob('/usr/lib/python3*/site-packages/pythonforandroid/archs.py') \
-                   + glob.glob('/usr/local/lib/python3*/site-packages/pythonforandroid/archs.py') \
-                   + glob.glob('/opt/**/pythonforandroid/archs.py', recursive=True)
-              base = os.path.dirname(cand[0]) if cand else None
+          import subprocess, shutil
+
+          def find_p4a():
+              # 1) 当前解释器直接导入
+              try:
+                  import pythonforandroid as p4a
+                  return os.path.dirname(p4a.__file__)
+              except Exception as e:
+                  print('import failed:', e)
+              # 2) 全盘搜
+              try:
+                  out = subprocess.run(
+                      ['bash', '-lc',
+                       'find / -xdev -name archs.py -path "*pythonforandroid*" 2>/dev/null | head -5'],
+                      capture_output=True, text=True, timeout=120).stdout.split()
+                  if out:
+                      return os.path.dirname(out[0])
+              except Exception as e:
+                  print('find failed:', e)
+              # 3) 从 buildozer 可执行文件的 shebang 反查解释器
+              bz = shutil.which('buildozer')
+              print('buildozer at:', bz)
+              if bz:
+                  try:
+                      with open(bz) as f:
+                          py = f.readline().strip().lstrip('#!').strip()
+                      print('shebang:', py)
+                      out = subprocess.run(
+                          [py, '-c', 'import pythonforandroid,os;print(os.path.dirname(pythonforandroid.__file__))'],
+                          capture_output=True, text=True, timeout=60).stdout.strip()
+                      if out:
+                          return out
+                  except Exception as e:
+                      print('shebang route failed:', e)
+              return None
+
+          base = find_p4a()
           print('p4a base:', base)
-          if not base:
+          if not base or not os.path.isdir(base):
               raise SystemExit('cannot locate pythonforandroid')
 
           # 1) 全局 LDFLAGS（autoconf/make 系 recipe 走这里）
