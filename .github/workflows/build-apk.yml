@@ -30,6 +30,7 @@ jobs:
             /github/home/.gradle
             /root/.buildozer
             /root/.gradle
+            .buildozer
           key: buildozer-container-${{ hashFiles('buildozer.spec') }}
           restore-keys: |
             buildozer-container-
@@ -40,7 +41,7 @@ jobs:
           import os, re, glob
           FLAG = '-Wl,-z,max-page-size=16384'
 
-          import subprocess, shutil
+          import subprocess, shutil, sys
 
           def find_p4a():
               # 1) 当前解释器直接导入
@@ -49,7 +50,14 @@ jobs:
                   return os.path.dirname(p4a.__file__)
               except Exception as e:
                   print('import failed:', e)
-              # 2) 全盘搜（buildozer 会把 p4a 源码下载到 ~/.buildozer 下）
+              # 1.5) buildozer 装在 venv 里，p4a 也在那（容器 python3 不是它）
+              for sp in sorted(glob.glob('/home/user/.venv/lib/python3.*/site-packages'),
+                               reverse=True):
+                  cand = os.path.join(sp, 'pythonforandroid')
+                  if os.path.isdir(cand):
+                      print('found via venv site-packages:', cand)
+                      return cand
+              # 2) 全盘搜
               for pat in ['python-for-android', 'pythonforandroid']:
                   try:
                       out = subprocess.run(
@@ -120,11 +128,10 @@ jobs:
           print('Application.mk patched:', n)
           PY
           # 3) 新参数必须重编才生效：清掉已编译产物（保留 SDK/NDK 免重下）
-          rm -rf /github/home/.buildozer/android/platform/build \
-                 /github/home/.buildozer/android/platform/build-* \
-                 /root/.buildozer/android/platform/build \
-                 /root/.buildozer/android/platform/build-*
-          echo "已清除 p4a 构建产物，本轮全量重编（16KB 参数才会生效）"
+          # p4a 的 storage-dir 是 <工程>/.buildozer/android/platform/build-<arch>，
+          # 不在 $HOME 下（这也是之前 rm 了个寂寞、缓存也没存到产物的原因）
+          rm -rf .buildozer/android/platform/build .buildozer/android/platform/build-*
+          echo "已清除 p4a 构建产物（.buildozer/android/platform/build*），本轮重编"
 
       - name: 开始打包
         run: |
@@ -175,8 +182,9 @@ jobs:
 
       - name: 校验 .so 页对齐（应全部为 0x4000）
         run: |
-          python3 - <<'PY'
+          python3 - <<'PY' | tee align_report.txt
           import zipfile, struct, glob
+          ok = bad = 0
           for apk in glob.glob('bin/*.apk'):
               z = zipfile.ZipFile(apk)
               print('==', apk)
@@ -195,9 +203,22 @@ jobs:
                       off = phoff + i * phentsize
                       if struct.unpack_from('<I', b, off)[0] == 1:
                           al.append(struct.unpack_from('<Q', b, off + 0x30)[0])
-                  m = hex(max(al)) if al else '?'
-                  print('  %-42s %s %s' % (n, m, 'OK' if al and max(al) >= 0x4000 else '*** 4KB ***'))
+                  m = max(al) if al else 0
+                  good = m >= 0x4000
+                  ok += good
+                  bad += (not good)
+                  print('  %-42s %-8s %s' % (n, hex(m), '16KB OK' if good else '*** 4KB ***'))
+          print('SUMMARY 16KB_ok=%d still_4KB=%d' % (ok, bad))
           PY
+
+      - name: 上传对齐校验报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: align-report
+          path: align_report.txt
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: 上传 APK（在页面底部 Artifacts 里下载）
         uses: actions/upload-artifact@v4
