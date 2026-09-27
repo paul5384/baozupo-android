@@ -18,7 +18,7 @@ source.include_patterns = fonts/*,assets/*
 version = 2.1.0
 
 # kivy 是必须的；不加多余依赖，打包最不容易失败
-requirements = python3==3.11.9,kivy
+requirements = hostpython3==3.11.9,python3==3.11.9,kivy
 
 orientation = portrait
 fullscreen = 0
