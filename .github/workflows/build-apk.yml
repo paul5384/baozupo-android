@@ -45,16 +45,26 @@ jobs:
                   return os.path.dirname(p4a.__file__)
               except Exception as e:
                   print('import failed:', e)
-              # 2) 全盘搜
-              try:
-                  out = subprocess.run(
-                      ['bash', '-lc',
-                       'find / -xdev -name archs.py -path "*pythonforandroid*" 2>/dev/null | head -5'],
-                      capture_output=True, text=True, timeout=120).stdout.split()
-                  if out:
-                      return os.path.dirname(out[0])
-              except Exception as e:
-                  print('find failed:', e)
+              # 2) 全盘搜（buildozer 会把 p4a 源码下载到 ~/.buildozer 下）
+              for pat in ['python-for-android', 'pythonforandroid']:
+                  try:
+                      out = subprocess.run(
+                          ['bash', '-lc',
+                           'find / -name "archs.py" -path "*%s*" 2>/dev/null | head -5' % pat],
+                          capture_output=True, text=True, timeout=180).stdout.split()
+                      print('find[%s] ->' % pat, out)
+                      if out:
+                          return os.path.dirname(out[0])
+                  except Exception as e:
+                      print('find failed:', e)
+              print('=== 环境探测 ===')
+              print('HOME=', os.environ.get('HOME'), 'USER=', os.environ.get('USER'))
+              for d in ['/root/.buildozer/android/platform', '/home/user/.buildozer/android/platform',
+                        '/root', '/home/user']:
+                  try:
+                      print(d, '->', os.listdir(d)[:40])
+                  except Exception as e:
+                      print(d, 'ERR', e)
               # 3) 从 buildozer 可执行文件的 shebang 反查解释器
               bz = shutil.which('buildozer')
               print('buildozer at:', bz)
