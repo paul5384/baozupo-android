@@ -18,7 +18,7 @@ source.include_patterns = fonts/*,assets/*
 version = 2.1.0
 
 # kivy 是必须的；不加多余依赖，打包最不容易失败
-requirements = python3,kivy
+requirements = python3==3.11.9,kivy
 
 orientation = portrait
 fullscreen = 0
@@ -36,7 +36,7 @@ presplash.color = #2F4F4F
 android.api = 34
 android.minapi = 24
 android.accept_license = yes
-android.ndk = 28c
+android.ndk = 25b
 
 # 使用本机已下载好的 SDK / NDK / JDK，避免 buildozer 联网重复下载
 android.sdk_path = C:/Users/L540/android-build/android-sdk

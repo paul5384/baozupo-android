@@ -173,16 +173,24 @@ _diag_report("S0 诊断块初始化完成")
 _diag_report("S1 开始导入 Kivy")
 
 
+_diag_report("S1.1 导入 kivy 基础包")
+import kivy
+_diag_report("S1.2 导入 kivy.app/lang/metrics/clock/utils")
 from kivy.app import App
 from kivy.lang import Builder
 from kivy.metrics import dp, sp
 from kivy.clock import Clock
 from kivy.utils import platform
+_diag_report("S1.3 导入 kivy.core.text")
 from kivy.core.text import LabelBase
+_diag_report("S1.4 导入 kivy.core.clipboard")
 from kivy.core.clipboard import Clipboard
+_diag_report("S1.5 导入 kivy.core.window（图形/SDL 相关）")
 from kivy.core.window import Window
+_diag_report("S1.6 导入 kivy.properties")
 from kivy.properties import (StringProperty, ListProperty, NumericProperty,
                              BooleanProperty, ObjectProperty)
+_diag_report("S1.7 导入 kivy.uix.*")
 from kivy.uix.screenmanager import ScreenManager, Screen, NoTransition
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.gridlayout import GridLayout
@@ -197,6 +205,7 @@ from kivy.uix.recycleview import RecycleView
 from kivy.uix.recycleview.views import RecycleDataViewBehavior
 from kivy.uix.behaviors import ButtonBehavior
 from kivy.uix.widget import Widget
+_diag_report("S1.8 全部 kivy 子模块导入完成")
 
 # ---- 诊断引导块 B：Kivy 导入成功 ----
 try:
