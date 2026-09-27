@@ -36,7 +36,7 @@ presplash.color = #2F4F4F
 android.api = 34
 android.minapi = 24
 android.accept_license = yes
-android.ndk = 25b
+android.ndk = 28c
 
 # 使用本机已下载好的 SDK / NDK / JDK，避免 buildozer 联网重复下载
 android.sdk_path = C:/Users/L540/android-build/android-sdk

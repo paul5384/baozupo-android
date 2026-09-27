@@ -145,6 +145,9 @@ jobs:
           open(p,'w',encoding='utf-8').write(s)
           print('已清除本地路径行，使用容器内置 SDK/NDK')
           PY
+          echo "--- 生效的 NDK / API 配置 ---"
+          grep -E '^android\.(ndk|api|minapi|archs)' buildozer.spec || true
+          ls -d /github/home/.buildozer/android/platform/android-ndk-* 2>/dev/null || true
           # 判定成败不看退出码（yes 会被 SIGPIPE 杀成 141，PIPESTATUS 取值也不可靠），
           # 直接以 bin 下是否产出 APK 为准
           set +o pipefail
