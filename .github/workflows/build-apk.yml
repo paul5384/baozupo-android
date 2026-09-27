@@ -23,7 +23,11 @@ jobs:
       - name: 缓存 buildozer 环境（首次约 40 分钟，之后 5 分钟左右）
         uses: actions/cache@v4
         with:
+          # 容器内 HOME 被 GH Actions 覆盖成 /github/home，写 /root/.buildozer 是错的
+          # （曾导致缓存永不命中，每轮都从零重编 ~40 分钟）
           path: |
+            /github/home/.buildozer
+            /github/home/.gradle
             /root/.buildozer
             /root/.gradle
           key: buildozer-container-${{ hashFiles('buildozer.spec') }}
@@ -85,7 +89,10 @@ jobs:
           base = find_p4a()
           print('p4a base:', base)
           if not base or not os.path.isdir(base):
-              raise SystemExit('cannot locate pythonforandroid')
+              # p4a 是 buildozer 运行时才下载到 ~/.buildozer 的，冷缓存时不存在。
+              # 此时跳过注入（本轮仍是 4KB），等缓存热了下一轮再生效，不要阻塞构建。
+              print('!! 未找到 pythonforandroid，跳过 16KB 注入（不影响本轮打包）')
+              raise SystemExit(0)
 
           # 1) 全局 LDFLAGS（autoconf/make 系 recipe 走这里）
           ap = os.path.join(base, 'archs.py')
