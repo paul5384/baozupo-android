@@ -120,8 +120,11 @@ jobs:
           print('Application.mk patched:', n)
           PY
           # 3) 新参数必须重编才生效：清掉已编译产物（保留 SDK/NDK 免重下）
-          rm -rf /root/.buildozer/android/platform/build /root/.buildozer/android/platform/build-*
-          echo "已清除 p4a 构建产物，本轮全量重编"
+          rm -rf /github/home/.buildozer/android/platform/build \
+                 /github/home/.buildozer/android/platform/build-* \
+                 /root/.buildozer/android/platform/build \
+                 /root/.buildozer/android/platform/build-*
+          echo "已清除 p4a 构建产物，本轮全量重编（16KB 参数才会生效）"
 
       - name: 开始打包
         run: |
