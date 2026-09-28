@@ -191,6 +191,22 @@ _diag_write("=" * 60)
 _diag_write("诊断版启动 %s" % DIAG_VERSION)
 _diag_env_dump()
 _diag_report("S0 诊断块初始化完成")
+# ==============================================================================
+# 【filetype 兜底】Kivy 2.3.1 的 kivy/core/image/__init__.py 会 import filetype，
+# 而本地 kivy recipe 为了绕开 charset_normalizer 装不上，去掉了 python_depends，
+# 于是 filetype 不会自动进 APK（真机报错：No module named 'filetype'）。
+# 解决办法：把 filetype 源码随工程一起打包，并在导入 kivy 前确保它在 sys.path 里。
+# ==============================================================================
+try:
+    _BD = os.path.dirname(os.path.abspath(__file__))
+    if _BD not in sys.path:
+        sys.path.insert(0, _BD)
+    import filetype as _ft
+    _diag_write("filetype 可用: %s" % getattr(_ft, "__file__", "?"))
+except Exception as _e:
+    _diag_write("!! filetype 不可用: %r" % (_e,))
+    _diag_report("S0.1 filetype 不可用: %r" % (_e,))
+
 _diag_report("S1 开始导入 Kivy")
 
 
