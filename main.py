@@ -15,6 +15,7 @@
 import os
 import sys
 import json
+import io
 import traceback
 from datetime import datetime, timedelta
 
@@ -166,6 +167,26 @@ def _diag_base_dir():
 
 
 _diag_init_log()
+
+# ---- native 崩溃取证：faulthandler（SIGSEGV / SIGABRT 等）----
+try:
+    import faulthandler
+    _FAULT_FILE = (os.path.join(os.path.dirname(_DIAG_FILES[0]), "baozupo_crash.txt")
+                   if _DIAG_FILES else None)
+    if _FAULT_FILE:
+        _FF = open(_FAULT_FILE, "a", buffering=1)
+        _FF.write("\n\n===== 启动 %s =====\n" % datetime.now().strftime("%m-%d %H:%M:%S"))
+        faulthandler.enable(file=_FF, all_threads=True)
+        _diag_write("faulthandler -> %s" % _FAULT_FILE)
+        # 把上一次的 native 崩溃栈回放进剪贴板（粘贴即可看到，不需要数据线）
+        try:
+            _prev = io.open(_FAULT_FILE, encoding="utf-8", errors="replace").read()
+            if "Current thread" in _prev or "Fatal Python error" in _prev:
+                _diag_clip("【上次 native 崩溃栈】\n" + _prev[-3000:])
+        except Exception:
+            pass
+except Exception as _e:
+    _diag_write("faulthandler 启用失败: %r" % (_e,))
 _diag_write("=" * 60)
 _diag_write("诊断版启动 %s" % DIAG_VERSION)
 _diag_env_dump()
@@ -173,39 +194,137 @@ _diag_report("S0 诊断块初始化完成")
 _diag_report("S1 开始导入 Kivy")
 
 
+# ==============================================================================
+# 诊断引导块 A2：崩溃取证 + 细粒度导入
+#   上一版证据：日志停在 S1.2，且没有 traceback（裸 import 抛异常会直接杀进程）。
+#   本版：每条 import 单独 try，失败立即写 traceback + 剪贴板 + 弹 AlertDialog。
+# ==============================================================================
+def _diag_alert(text):
+    """安卓上弹一个可长按复制的对话框；任何失败都静默。"""
+    try:
+        from jnius import autoclass, PythonJavaClass, java_method
+        act = autoclass("org.kivy.android.PythonActivity").mActivity
+        AlertDialog = autoclass("android.app.AlertDialog")
+        builder = AlertDialog.Builder(act)
+        builder.setTitle("启动失败诊断")
+        builder.setMessage(text[:3000])
+        builder.setPositiveButton("关闭", None)
+
+        class _Run(PythonJavaClass):
+            __javainterfaces__ = ["java/lang/Runnable"]
+
+            @java_method("()V")
+            def run(self):
+                try:
+                    builder.show()
+                except Exception:
+                    pass
+
+        act.runOnUiThread(_Run())
+    except Exception:
+        try:
+            from jnius import autoclass
+            act = autoclass("org.kivy.android.PythonActivity").mActivity
+            Toast = autoclass("android.widget.Toast")
+            Toast.makeText(act, autoclass("java.lang.String")(text[:200]),
+                           Toast.LENGTH_LONG).show()
+        except Exception:
+            pass
+
+
+def _diag_crash(stage, err):
+    """崩溃取证：日志 + 剪贴板 + 弹窗，然后退出。"""
+    try:
+        tb = "".join(traceback.format_exception(type(err), err, err.__traceback__))
+    except Exception:
+        tb = repr(err)
+    msg = "【包租婆诊断 %s】\n崩溃阶段: %s\n\n%s" % (DIAG_VERSION, stage, tb)
+    _diag_write("!! 崩溃 %s\n%s" % (stage, tb))
+    for path in _DIAG_FILES:
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(msg + "\n")
+        except Exception:
+            pass
+    _diag_clip(msg)
+    _diag_alert(msg)
+    sys.exit(1)
+
+
+def _diag_step(stage, code):
+    """执行一条 import 语句（用 exec 注入模块全局），失败立刻取证。"""
+    _diag_report(stage)
+    try:
+        exec(code, globals())
+    except BaseException as _e:
+        _diag_crash(stage, _e)
+
+
 _diag_report("S1.1 导入 kivy 基础包")
-import kivy
-_diag_report("S1.2 导入 kivy.app/lang/metrics/clock/utils")
-from kivy.app import App
-from kivy.lang import Builder
-from kivy.metrics import dp, sp
-from kivy.clock import Clock
-from kivy.utils import platform
-_diag_report("S1.3 导入 kivy.core.text")
-from kivy.core.text import LabelBase
-_diag_report("S1.4 导入 kivy.core.clipboard")
-from kivy.core.clipboard import Clipboard
-_diag_report("S1.5 导入 kivy.core.window（图形/SDL 相关）")
-from kivy.core.window import Window
-_diag_report("S1.6 导入 kivy.properties")
-from kivy.properties import (StringProperty, ListProperty, NumericProperty,
-                             BooleanProperty, ObjectProperty)
-_diag_report("S1.7 导入 kivy.uix.*")
-from kivy.uix.screenmanager import ScreenManager, Screen, NoTransition
-from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.gridlayout import GridLayout
-from kivy.uix.label import Label
-from kivy.uix.button import Button
-from kivy.uix.textinput import TextInput
-from kivy.uix.spinner import Spinner
-from kivy.uix.checkbox import CheckBox
-from kivy.uix.popup import Popup
-from kivy.uix.scrollview import ScrollView
-from kivy.uix.recycleview import RecycleView
-from kivy.uix.recycleview.views import RecycleDataViewBehavior
-from kivy.uix.behaviors import ButtonBehavior
-from kivy.uix.widget import Widget
-_diag_report("S1.8 全部 kivy 子模块导入完成")
+try:
+    import kivy
+except BaseException as _e:
+    _diag_crash("S1.1 import kivy", _e)
+_diag_report("S1.1 OK kivy=%s" % getattr(kivy, "__version__", "?"))
+
+# ---- S1.1.x 环境取证：native 库目录 / dlopen 能力 / bundle 完整性 ----
+_diag_report("S1.1.A 探测 nativeLibraryDir")
+try:
+    from jnius import autoclass
+    _act = autoclass("org.kivy.android.PythonActivity").mActivity
+    _nd = _act.getApplicationInfo().nativeLibraryDir
+    _diag_write("nativeLibraryDir: %s" % _nd)
+    try:
+        _diag_write("nativeLibs: %s" % sorted(os.listdir(_nd)))
+    except Exception as _e:
+        _diag_write("nativeLibs 读取失败: %r" % (_e,))
+except Exception as _e:
+    _diag_write("nativeLibraryDir 获取失败: %r" % (_e,))
+
+_diag_report("S1.1.B 测试 dlopen libpython3.11.so")
+try:
+    import ctypes
+    _h = ctypes.CDLL("libpython3.11.so")
+    _diag_write("dlopen libpython3.11.so: OK -> %s" % _h)
+except Exception as _e:
+    _diag_write("dlopen libpython3.11.so 失败: %r" % (_e,))
+    _diag_report("S1.1.B dlopen 失败: %r" % (_e,))
+
+_diag_report("S1.1.C 检查 kivy 包完整性")
+try:
+    _kd = os.path.dirname(os.path.abspath(kivy.__file__))
+    _diag_write("kivy dir: %s" % _kd)
+    _diag_write("kivy 顶层: %s" % sorted(os.listdir(_kd))[:40])
+    for _sub in ("core", "graphics", "uix", "lib"):
+        _diag_write("  %s 存在: %s" % (_sub, os.path.isdir(os.path.join(_kd, _sub))))
+    _diag_write("  _clock.so 存在: %s" % os.path.isfile(os.path.join(_kd, "_clock.so")))
+except Exception as _e:
+    _diag_write("kivy 目录探测失败: %r" % (_e,))
+
+
+_diag_step("S1.2.1 kivy.utils", "from kivy.utils import platform")
+_diag_step("S1.2.2 kivy.logger", "from kivy.logger import Logger")
+_diag_step("S1.2.3 kivy.config", "from kivy.config import Config")
+_diag_step("S1.2.4 kivy.clock (_clock.so)", "from kivy.clock import Clock")
+_diag_step("S1.2.5 kivy.metrics (_metrics.so)", "from kivy.metrics import dp, sp")
+_diag_step("S1.2.6 kivy.graphics (graphics/*.so)", "import kivy.graphics")
+_diag_step("S1.2.7 kivy.core.window (_window_sdl2.so + SDL2)", "from kivy.core.window import Window")
+_diag_step("S1.2.8 kivy.lang", "from kivy.lang import Builder")
+_diag_step("S1.2.9 kivy.properties (properties.so)",
+           "from kivy.properties import StringProperty, ListProperty, NumericProperty, BooleanProperty, ObjectProperty")
+_diag_step("S1.2.10 kivy.event (_event.so)", "from kivy.event import EventDispatcher")
+_diag_step("S1.2.11 kivy.app (含 kivy.base/input)", "from kivy.app import App")
+_diag_step("S1.3 kivy.core.text (text_layout.so)", "from kivy.core.text import LabelBase")
+_diag_step("S1.4 kivy.core.clipboard", "from kivy.core.clipboard import Clipboard")
+_diag_step("S1.5 kivy.uix 基础控件",
+           "from kivy.uix.boxlayout import BoxLayout; from kivy.uix.gridlayout import GridLayout; from kivy.uix.label import Label; from kivy.uix.button import Button; from kivy.uix.textinput import TextInput")
+_diag_step("S1.6 kivy.uix 高级控件",
+           "from kivy.uix.spinner import Spinner; from kivy.uix.checkbox import CheckBox; from kivy.uix.popup import Popup; from kivy.uix.scrollview import ScrollView; from kivy.uix.widget import Widget")
+_diag_step("S1.7 kivy.uix.screenmanager",
+           "from kivy.uix.screenmanager import ScreenManager, Screen, NoTransition")
+_diag_step("S1.8 kivy.uix.recycleview",
+           "from kivy.uix.recycleview import RecycleView; from kivy.uix.recycleview.views import RecycleDataViewBehavior; from kivy.uix.behaviors import ButtonBehavior")
+_diag_report("S1.9 全部 kivy 子模块导入完成")
 
 # ---- 诊断引导块 B：Kivy 导入成功 ----
 try:
