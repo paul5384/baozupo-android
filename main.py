@@ -368,6 +368,11 @@ C_DANGER = (0.753, 0.314, 0.302, 1)
 C_WARN = (0.851, 0.643, 0.255, 1)
 C_INFO = (0.243, 0.420, 0.478, 1)
 
+# 弹窗内部配色：Kivy 弹窗面板是深灰色，里面的文字必须用亮色才看得清
+POPUP_LABEL_C = (0.84, 0.89, 0.88, 1)   # 字段标签
+POPUP_TEXT_C = (0.93, 0.95, 0.95, 1)    # 正文
+BTN_NEUTRAL_C = (0.58, 0.63, 0.61, 1)   # 「取消」类按钮背景（深一点，白字才清楚）
+
 CARD_COLORS = [
     (0.184, 0.310, 0.310, 1), (0.290, 0.486, 0.349, 1), (0.243, 0.420, 0.478, 1),
     (0.541, 0.427, 0.231, 1), (0.478, 0.290, 0.420, 1), (0.361, 0.514, 0.455, 1),
@@ -784,10 +789,16 @@ class FormDialog(Popup):
       on_change : 下拉框选中后的回调 (widget, text, all_widgets)
     """
 
-    ROW_H = 68        # 单行字段总高（标签 20 + 输入框 44 + 间距）
+    # 注意：这里不能写死像素。曾写成 ROW_H = 68（原始像素），在 density≈2.75
+    # 的真机上 68px 根本装不下 dp(20) 的标签 + dp(44) 的输入框（共约 175px），
+    # 于是「添加房间 / 修改密码 / 全局提醒设置」的表单全部挤在一起重叠。
+    # 现在改为实例化时用 dp() 计算，桌面（density=1）与手机表现一致。
 
     def __init__(self, title, fields, on_submit, submit_text="保存", **kw):
         super(FormDialog, self).__init__(**kw)
+        self.lab_h = dp(20)                           # 字段标签高
+        self.ctl_h = dp(44)                           # 输入框 / 下拉框高
+        self.row_h = self.lab_h + self.ctl_h + dp(6)  # 单行字段总高
         self.title = title
         self.title_size = sp(16)
         self.auto_dismiss = False
@@ -802,7 +813,7 @@ class FormDialog(Popup):
             if f.get("half"):
                 if pending is None:
                     pending = BoxLayout(orientation="horizontal", size_hint_y=None,
-                                        height=self.ROW_H, spacing=dp(8))
+                                        height=self.row_h, spacing=dp(8))
                     pending.add_widget(cell)
                     grid.add_widget(pending)
                 else:
@@ -815,7 +826,7 @@ class FormDialog(Popup):
                 grid.add_widget(cell)
 
         row_count = len(grid.children)
-        body_h = dp(74) + self.ROW_H * row_count + dp(56)
+        body_h = dp(74) + self.row_h * row_count + dp(56)
         max_h = Window.height * 0.95
         self.size_hint = (0.94, None)
         self.height = min(body_h, max_h)
@@ -831,7 +842,7 @@ class FormDialog(Popup):
             root.add_widget(Widget())
 
         bar = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
-        b_cancel = Button(text="取消", font_size=sp(15), background_color=(0.78, 0.80, 0.79, 1),
+        b_cancel = Button(text="取消", font_size=sp(15), background_color=BTN_NEUTRAL_C,
                           color=(1, 1, 1, 1))
         b_cancel.bind(on_release=lambda *_: self.dismiss())
         b_ok = Button(text=submit_text, font_size=sp(15), background_color=C_ACCENT,
@@ -843,10 +854,10 @@ class FormDialog(Popup):
         self.content = root
 
     def _make_cell(self, f):
-        cell = BoxLayout(orientation="vertical", size_hint_y=None, height=self.ROW_H - dp(4),
-                         spacing=dp(1))
-        lab = Label(text=f.get("label", ""), size_hint_y=None, height=dp(20),
-                    font_size=sp(12), color=C_MUTED, halign="left", valign="middle")
+        cell = BoxLayout(orientation="vertical", size_hint_y=None, height=self.row_h,
+                         spacing=dp(2))
+        lab = Label(text=f.get("label", ""), size_hint_y=None, height=self.lab_h,
+                    font_size=sp(12), color=POPUP_LABEL_C, halign="left", valign="middle")
         lab.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
         cell.add_widget(lab)
         if f.get("kind") == "combo":
@@ -871,7 +882,7 @@ class FormDialog(Popup):
 def info_popup(title, message, on_close=None, btn="知道了"):
     box = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
     sv = ScrollView(do_scroll_x=False)
-    lab = Label(text=message, size_hint_y=None, font_size=sp(14), color=C_TEXT,
+    lab = Label(text=message, size_hint_y=None, font_size=sp(14), color=POPUP_TEXT_C,
                 halign="left", valign="top")
     lab.bind(width=lambda w, *_: setattr(w, "text_size", (w.width, None)))
     lab.bind(texture_size=lambda w, *_: setattr(w, "height", w.texture_size[1]))
@@ -891,11 +902,11 @@ def info_popup(title, message, on_close=None, btn="知道了"):
 
 def confirm_popup(title, message, on_yes, yes_text="确定", danger=False):
     box = BoxLayout(orientation="vertical", spacing=dp(10), padding=dp(10))
-    lab = Label(text=message, font_size=sp(14), color=C_TEXT, halign="left", valign="top")
+    lab = Label(text=message, font_size=sp(14), color=POPUP_TEXT_C, halign="left", valign="top")
     lab.bind(width=lambda w, *_: setattr(w, "text_size", (w.width, None)))
     box.add_widget(lab)
     bar = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
-    b_no = Button(text="取消", font_size=sp(15), background_color=(0.78, 0.80, 0.79, 1),
+    b_no = Button(text="取消", font_size=sp(15), background_color=BTN_NEUTRAL_C,
                   color=(1, 1, 1, 1))
     b_yes = Button(text=yes_text, font_size=sp(15),
                    background_color=C_DANGER if danger else C_ACCENT, color=(1, 1, 1, 1))
@@ -1514,7 +1525,7 @@ class BaozupoApp(App):
             box.add_widget(row)
 
         bar = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
-        b_no = Button(text="取消", font_size=sp(15), background_color=(0.78, 0.80, 0.79, 1),
+        b_no = Button(text="取消", font_size=sp(15), background_color=BTN_NEUTRAL_C,
                       color=(1, 1, 1, 1))
         b_yes = Button(text="确认删除", font_size=sp(15), background_color=C_DANGER, color=(1, 1, 1, 1))
         bar.add_widget(b_no)

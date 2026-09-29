@@ -14,6 +14,13 @@
 #:set C_DANGER (0.753, 0.314, 0.302, 1)
 #:set C_INFO (0.243, 0.420, 0.478, 1)
 
+# ============================== 弹窗统一样式 ==============================
+# Kivy 的 ModalView 默认 overlay_color = (0,0,0,0.7)：70% 黑遮罩会把整屏压暗，
+# 弹窗里的浅色文字就更看不见了。这里统一减淡到 45%。
+<Popup>:
+    overlay_color: 0, 0, 0, 0.45
+
+
 <Root>:
     orientation: 'vertical'
     canvas.before:
