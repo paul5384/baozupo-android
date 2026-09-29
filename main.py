@@ -1237,8 +1237,8 @@ class BaozupoApp(App):
              "value": base["addr"], "hint": "例如 上富佳苑"},
             {"key": "pick", "label": "已有小区快速带入（选填）", "kind": "combo",
              "values": ["不选择"] + addrs, "value": "不选择", "on_change": fill_by_addr},
-            {"key": "room", "label": "房间号", "kind": "text", "value": base["room"],
-             "readonly": (mode == "edit"), "half": True},
+            {"key": "room", "label": "房间号（可修改）", "kind": "text", "value": base["room"],
+             "half": True},
             {"key": "area", "label": "面积㎡（只填数字）", "kind": "text",
              "value": base["area"], "half": True},
             {"key": "price", "label": "月租金元（只填数字）", "kind": "text",
@@ -1280,12 +1280,33 @@ class BaozupoApp(App):
                 if not h:
                     self.toast("找不到该房间")
                     return False
+                # ★ 房间号可修改：改号时先查重，再把它名下所有关联记录一起迁移
+                if str(room_no) != str(room):
+                    if self.store.find_house(room_no):
+                        self.toast("房间号「%s」已被占用，请换一个" % room_no)
+                        return False
+                    old_no = str(room)
+                    for t in self.store.data["tenants"]:
+                        if str(t.get("room")) == old_no:
+                            t["room"] = room_no
+                    for p in self.store.data["payments"]:
+                        if str(p.get("room")) == old_no:
+                            p["room"] = room_no
+                    for u in self.store.data["utilities"]:
+                        if str(u.get("room")) == old_no:
+                            u["room"] = room_no
+                    h["room"] = room_no
                 h.update({"address": addr, "area": area, "price": price,
                           "kitchen": v.get("kitchen", "无"), "toilet": v.get("toilet", "无"),
                           "balcony": v.get("balcony", "无"), "status": v.get("status", "空闲")})
             self.store.save()
             self.refresh_houses()
-            self.toast("保存成功" if mode == "add" else "房间「%s」已修改" % room)
+            if mode == "add":
+                self.toast("保存成功")
+            elif str(room_no) != str(room):
+                self.toast("房间号已由「%s」改为「%s」" % (room, room_no))
+            else:
+                self.toast("房间「%s」已修改" % room_no)
             return True
 
         FormDialog("添加新房" if mode == "add" else "修改房屋 - %s" % room,
