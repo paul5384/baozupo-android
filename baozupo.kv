@@ -304,7 +304,7 @@
             id: rv
             viewclass: 'HouseCard'
             RecycleBoxLayout:
-                default_size: None, dp(142)
+                default_size: None, dp(162)
                 default_size_hint: 1, None
                 size_hint_y: None
                 height: self.minimum_height
@@ -316,7 +316,7 @@
 <HouseCard>:
     orientation: 'vertical'
     size_hint_y: None
-    height: dp(142)
+    height: dp(162)
     padding: dp(10)
     spacing: dp(2)
     canvas.before:
@@ -343,6 +343,7 @@
             halign: 'left'
             valign: 'middle'
             text_size: self.size
+            shorten: True
         Label:
             text: root.status
             font_size: sp(12)
@@ -368,6 +369,7 @@
         halign: 'left'
         valign: 'middle'
         text_size: self.size
+        shorten: True
     Label:
         text: root.line2
         font_size: sp(12)
@@ -377,6 +379,7 @@
         halign: 'left'
         valign: 'middle'
         text_size: self.size
+        shorten: True
     Label:
         text: root.line3
         font_size: sp(11)
@@ -386,6 +389,17 @@
         halign: 'left'
         valign: 'middle'
         text_size: self.size
+        shorten: True
+    Label:
+        text: root.line4
+        font_size: sp(11)
+        color: C_MUTED
+        size_hint_y: None
+        height: dp(18)
+        halign: 'left'
+        valign: 'middle'
+        text_size: self.size
+        shorten: True
     BoxLayout:
         size_hint_y: None
         height: dp(34)
@@ -452,7 +466,7 @@
             id: rv
             viewclass: 'TenantCard'
             RecycleBoxLayout:
-                default_size: None, dp(96)
+                default_size: None, dp(118)
                 default_size_hint: 1, None
                 size_hint_y: None
                 height: self.minimum_height
@@ -464,7 +478,7 @@
 <TenantCard>:
     orientation: 'vertical'
     size_hint_y: None
-    height: dp(96)
+    height: dp(118)
     padding: dp(10)
     spacing: dp(2)
     canvas.before:
@@ -491,6 +505,7 @@
             halign: 'left'
             valign: 'middle'
             text_size: self.size
+            shorten: True
         Label:
             text: root.room
             font_size: sp(13)
@@ -500,6 +515,7 @@
             halign: 'right'
             valign: 'middle'
             text_size: self.size
+            shorten: True
         Label:
             text: root.tag
             font_size: sp(12)
@@ -525,6 +541,7 @@
         halign: 'left'
         valign: 'middle'
         text_size: self.size
+        shorten: True
     Label:
         text: root.line2
         font_size: sp(11)
@@ -534,6 +551,17 @@
         halign: 'left'
         valign: 'middle'
         text_size: self.size
+        shorten: True
+    Label:
+        text: root.line3
+        font_size: sp(11)
+        color: C_MUTED
+        size_hint_y: None
+        height: dp(20)
+        halign: 'left'
+        valign: 'middle'
+        text_size: self.size
+        shorten: True
 
 
 # ============================== 我的 ==============================

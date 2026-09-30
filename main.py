@@ -14,6 +14,7 @@
 
 import os
 import sys
+import time
 import json
 import io
 import traceback
@@ -699,9 +700,40 @@ class HouseCard(RecycleDataViewBehavior, BoxLayout):
     line1 = StringProperty("")
     line2 = StringProperty("")
     line3 = StringProperty("")
+    line4 = StringProperty("")
     card_bg = ListProperty([1, 1, 1, 1])
     tag_bg = ListProperty([0.29, 0.49, 0.35, 1])
     tag_fg = ListProperty([1, 1, 1, 1])
+
+    # 双击卡片（按钮区除外）打开「查看详情」
+    # 不用 touch.is_double_tap：部分输入后端不设置该标志，自己按「时间 + 位置」判定更可靠
+    _TAP_GAP = 0.45        # 两次点击最大间隔（秒）
+    _TAP_DIST = 40         # 两次点击最大位移（dp），避免滚动/拖动被误判
+
+    def __init__(self, **kw):
+        super(HouseCard, self).__init__(**kw)
+        self._last_tap = 0.0
+        self._last_pos = (0, 0)
+
+    def _in_button_row(self, pos):
+        """底部 dp(34) 的按钮行 + padding：这一区域交给四个按钮，不参与双击"""
+        return pos[1] <= self.y + dp(48)
+
+    def on_touch_down(self, touch):
+        if self.collide_point(*touch.pos) and not self._in_button_row(touch.pos):
+            now = time.time()
+            dx = abs(touch.pos[0] - self._last_pos[0])
+            dy = abs(touch.pos[1] - self._last_pos[1])
+            if now - self._last_tap < self._TAP_GAP and dx < dp(self._TAP_DIST) \
+                    and dy < dp(self._TAP_DIST):
+                self._last_tap = 0.0
+                app = App.get_running_app()
+                if app is not None and self.room:
+                    app.open_detail(self.room)
+                return True
+            self._last_tap = now
+            self._last_pos = touch.pos
+        return super(HouseCard, self).on_touch_down(touch)
 
 
 class TenantCard(RecycleDataViewBehavior, BoxLayout):
@@ -709,6 +741,7 @@ class TenantCard(RecycleDataViewBehavior, BoxLayout):
     room = StringProperty("")
     line1 = StringProperty("")
     line2 = StringProperty("")
+    line3 = StringProperty("")
     tag = StringProperty("")
     tag_bg = ListProperty([0.29, 0.49, 0.35, 1])
 
@@ -1162,21 +1195,24 @@ class BaozupoApp(App):
             rented = (st == "已租")
             fac = "厨:%s  卫:%s  阳台:%s" % (h.get("kitchen", "无"), h.get("toilet", "无"),
                                             h.get("balcony", "无"))
+            line3, line4 = "", ""
             if rented and t:
                 line2 = "租客 %s  %s" % (t.get("name", ""), t.get("tel", ""))
-                line3 = "入住 %s → 到期 %s  押金 %s元" % (
-                    t.get("in_date", ""), t.get("out_date", ""), t.get("deposit", "0"))
+                # ★ 原来「入住 + 到期 + 押金 + 最近收租」全挤一行，手机窄屏放不下会被截断，
+                #   现在拆成两行，各字段都完整可见
+                line3 = "入住 %s → 到期 %s" % (t.get("in_date", ""), t.get("out_date", ""))
+                line4 = "押金 %s元" % t.get("deposit", "0")
             elif rented:
-                line2, line3 = "已租（无租客记录）", ""
+                line2 = "已租（无租客记录）"
             else:
-                line2, line3 = "空闲中 · 点击下方「租客」登记入住", ""
+                line2 = "空闲中 · 点击下方「租客」登记入住"
             pays = self.store.pays_of(room)
             if pays:
-                line3 = (line3 + "   最近收租 " + str(pays[-1].get("date", ""))).strip()
+                line4 = (line4 + "   最近收租 " + str(pays[-1].get("date", ""))).strip()
             rows.append({
                 "room": room, "address": str(h.get("address", "")), "status": st,
                 "line1": "%s㎡ · %s元/月 · %s" % (h.get("area", ""), h.get("price", ""), fac),
-                "line2": line2, "line3": line3,
+                "line2": line2, "line3": line3, "line4": line4,
                 "tag_bg": list(C_ACCENT) if rented else [0.61, 0.67, 0.65, 1],
                 "card_bg": [1, 1, 1, 1],
             })
@@ -1610,7 +1646,10 @@ class BaozupoApp(App):
                 "name": str(t.get("name", "")), "room": room,
                 "line1": "%s · %s   押金 %s元" % (t.get("in_date", ""), t.get("rent_type", ""),
                                                 t.get("deposit", "0")),
-                "line2": "电话 %s   到期 %s  %s" % (t.get("tel", ""), t.get("out_date", ""), left),
+                # ★ 拆两行：原来「电话 + 到期 + 还剩」挤一行，手机窄屏会折行溢出
+                #   （Label 只有一行高度，第二行文字画到卡片外 → 看起来和别的字重叠）
+                "line2": "电话 %s" % t.get("tel", ""),
+                "line3": "到期 %s · %s" % (t.get("out_date", ""), left or "未填到期日"),
                 "tag": "已退租" if t.get("is_leave", False) else "在租",
                 "tag_bg": [0.61, 0.67, 0.65, 1] if t.get("is_leave", False) else list(C_ACCENT),
             })
