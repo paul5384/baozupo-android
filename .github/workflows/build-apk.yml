@@ -20,6 +20,33 @@ jobs:
       - name: 拉取代码
         uses: actions/checkout@v4
 
+      # ==== 签名 keystore ====
+      # buildozer debug 出来的 APK 是【未签名】的，手机会直接拒绝安装。
+      # keystore 不能提交进公开仓库，所以用 Actions cache 持久化：
+      #   首次 keytool 生成 → post 阶段存入 cache → 之后每次 restore 同一份证书，
+      #   这样各版本签名一致，用户可以覆盖升级而不用卸载重装。
+      - name: 恢复签名 keystore
+        uses: actions/cache@v4
+        with:
+          path: .signing
+          key: baozupo-signing-keystore-v1
+
+      - name: 若无则生成 keystore
+        run: |
+          set -e
+          mkdir -p .signing
+          if [ ! -f .signing/app.keystore ]; then
+            echo "首次运行：生成 keystore"
+            keytool -genkeypair -v -keystore .signing/app.keystore -storetype PKCS12 \
+              -storepass baozupo2026 -keypass baozupo2026 -alias baozupo \
+              -keyalg RSA -keysize 2048 -validity 18250 \
+              -dname "CN=Baozupo App, OU=Rental, O=Baozupo, L=Guangzhou, ST=GD, C=CN"
+          else
+            echo "复用已缓存 keystore"
+          fi
+          keytool -list -v -keystore .signing/app.keystore -storepass baozupo2026 \
+            -alias baozupo | grep -E 'SHA1:|SHA256:' || true
+
       - name: 缓存 buildozer 环境（首次约 40 分钟，之后 5 分钟左右）
         uses: actions/cache@v4
         with:
@@ -222,6 +249,36 @@ jobs:
           path: align_report.txt
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: zipalign + 签名（否则手机报「未签名，无法安装」）
+        run: |
+          set +e
+          ZIPALIGN=$(find /github/home /root /opt /usr/local -maxdepth 8 -type f -name zipalign \
+                     -path '*/build-tools/*' 2>/dev/null | sort | tail -1)
+          echo "zipalign -> [$ZIPALIGN]"
+          if [ -z "$ZIPALIGN" ]; then
+            echo "::warning::找不到 zipalign/apksigner，本轮 APK 仍未签名"
+          else
+            BT=$(dirname "$ZIPALIGN")
+            for a in bin/*.apk; do
+              b=$(basename "$a" .apk)
+              "$BT/zipalign" -p -f 4 "$a" "${b}_al.apk"
+              if [ -f "$BT/apksigner" ]; then
+                "$BT/apksigner" sign --ks .signing/app.keystore --ks-pass pass:baozupo2026 \
+                  --key-pass pass:baozupo2026 --ks-key-alias baozupo --out "${b}_sg.apk" "${b}_al.apk"
+                "$BT/apksigner" verify --print-certs "${b}_sg.apk"
+              else
+                java -cp "$BT/lib/apksigner.jar" com.android.apksigner.ApkSignerTool sign \
+                  --ks .signing/app.keystore --ks-pass pass:baozupo2026 \
+                  --key-pass pass:baozupo2026 --ks-key-alias baozupo --out "${b}_sg.apk" "${b}_al.apk"
+                java -cp "$BT/lib/apksigner.jar" com.android.apksigner.ApkSignerTool verify --print-certs "${b}_sg.apk"
+              fi
+              mv -f "${b}_sg.apk" "$a"
+              rm -f "${b}_al.apk"
+            done
+            echo "--- 签名后 ---"
+            ls -lh bin/
+          fi
 
       - name: 上传 APK（在页面底部 Artifacts 里下载）
         uses: actions/upload-artifact@v4
