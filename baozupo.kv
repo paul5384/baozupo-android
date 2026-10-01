@@ -451,17 +451,28 @@
                 Rectangle:
                     pos: self.pos
                     size: self.size
-        Label:
-            id: count
-            text: ''
-            font_size: sp(11)
-            color: C_MUTED
+        BoxLayout:
             size_hint_y: None
-            height: dp(24)
+            height: dp(36)
             padding: dp(12), 0
-            halign: 'left'
-            valign: 'middle'
-            text_size: self.size
+            spacing: dp(8)
+            Label:
+                id: count
+                text: ''
+                font_size: sp(11)
+                color: C_MUTED
+                halign: 'left'
+                valign: 'middle'
+                text_size: self.size
+                shorten: True
+            Button:
+                text: '导出名单'
+                font_size: sp(12)
+                size_hint_x: None
+                width: dp(88)
+                background_color: C_ACCENT
+                color: (1, 1, 1, 1)
+                on_release: app.export_tenants_csv()
         RecycleView:
             id: rv
             viewclass: 'TenantCard'

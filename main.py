@@ -912,7 +912,8 @@ class FormDialog(Popup):
             self.dismiss()
 
 
-def info_popup(title, message, on_close=None, btn="知道了"):
+def info_popup(title, message, on_close=None, btn="知道了", extra_btn=None):
+    """extra_btn=(按钮文字, 回调)：用于「查看详情时顺手导出」这类场景。"""
     box = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
     sv = ScrollView(do_scroll_x=False)
     lab = Label(text=message, size_hint_y=None, font_size=sp(14), color=POPUP_TEXT_C,
@@ -921,12 +922,24 @@ def info_popup(title, message, on_close=None, btn="知道了"):
     lab.bind(texture_size=lambda w, *_: setattr(w, "height", w.texture_size[1]))
     sv.add_widget(lab)
     box.add_widget(sv)
-    b = Button(text=btn, size_hint_y=None, height=dp(46), font_size=sp(15),
-               background_color=C_ACCENT, color=(1, 1, 1, 1))
-    box.add_widget(b)
     p = Popup(title=title, title_size=sp(16), content=box, size_hint=(0.92, 0.7),
               auto_dismiss=True)
-    b.bind(on_release=lambda *_: p.dismiss())
+    if extra_btn:
+        bar = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
+        b2 = Button(text=extra_btn[0], font_size=sp(15),
+                    background_color=C_INFO, color=(1, 1, 1, 1))
+        b2.bind(on_release=lambda *_: extra_btn[1]())
+        b1 = Button(text=btn, size_hint_x=0.45, font_size=sp(15),
+                    background_color=C_ACCENT, color=(1, 1, 1, 1))
+        bar.add_widget(b2)
+        bar.add_widget(b1)
+        box.add_widget(bar)
+        b1.bind(on_release=lambda *_: p.dismiss())
+    else:
+        b = Button(text=btn, size_hint_y=None, height=dp(46), font_size=sp(15),
+                   background_color=C_ACCENT, color=(1, 1, 1, 1))
+        box.add_widget(b)
+        b.bind(on_release=lambda *_: p.dismiss())
     if on_close:
         p.bind(on_dismiss=lambda *_: on_close())
     p.open()
@@ -1138,7 +1151,7 @@ class BaozupoApp(App):
             quick.add_widget(b)
         body.add_widget(quick)
 
-        body.add_widget(self._hint("数据文件：%s" % DATA_FILE))
+        # 数据文件路径只在「关于」里显示，首页不再占用版面
 
     def on_month_change(self, spinner, text):
         if not text or text == self.stat_ym:
@@ -1377,6 +1390,53 @@ class BaozupoApp(App):
         p.content = box
         p.open()
 
+    # ------------------------------------------------------------------ 导出
+    def _write_public(self, name, content):
+        """把文本写到手机可访问的公共目录，返回保存路径；全失败返回 None。"""
+        for d in public_dirs():
+            try:
+                path = os.path.join(d, name)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(content)
+                return path
+            except Exception:
+                continue
+        return None
+
+    def export_tenants_csv(self, *a):
+        """导出全部租客（含历史）为 CSV，Excel/WPS 可直接打开。"""
+        self.store.load()
+        import csv as _csv
+        buf = io.StringIO()
+        w = _csv.writer(buf)
+        w.writerow(["房间号", "姓名", "电话", "入住日期", "到期日期", "租期",
+                    "押金(元)", "状态", "剩余天数"])
+        ts = self.store.data.get("tenants", [])
+        try:
+            ts = sorted(ts, key=lambda x: room_key(x.get("room", "")))
+        except Exception:
+            pass
+        for t in ts:
+            left = ""
+            try:
+                d = datetime.strptime(t.get("out_date", ""), "%Y-%m-%d").date()
+                left = str((d - datetime.now().date()).days)
+            except Exception:
+                pass
+            w.writerow([str(t.get("room", "")), str(t.get("name", "")), str(t.get("tel", "")),
+                        str(t.get("in_date", "")), str(t.get("out_date", "")),
+                        str(t.get("rent_type", "")), str(t.get("deposit", "0")),
+                        "已退租" if t.get("is_leave", False) else "在租", left])
+        # BOM：不加的话 Excel 打开中文全是乱码
+        data = "\ufeff" + buf.getvalue()
+        name = "租客名单_%s.csv" % datetime.now().strftime("%Y%m%d_%H%M")
+        path = self._write_public(name, data)
+        if path:
+            info_popup("导出成功", "租客名单已保存到：\n%s\n\n共 %d 条记录，"
+                                   "用 Excel / WPS 打开即可。" % (path, len(ts)))
+        else:
+            self.toast("导出失败：没有可写的存储目录")
+
     def open_detail(self, room):
         self.store.load()
         h = self.store.find_house(room)
@@ -1415,7 +1475,18 @@ class BaozupoApp(App):
             lines.append("（暂无）")
         for u in us:
             lines.append("· %s  电费 %s元  水费 %s元" % (u.get("month", ""), u.get("elec", ""), u.get("water", "")))
-        info_popup("%s · 房间详情" % room, "\n".join(lines))
+
+        def do_export():
+            name = "房间%s_详情_%s.txt" % (room.replace("/", "-"),
+                                          datetime.now().strftime("%Y%m%d_%H%M"))
+            path = self._write_public(name, "\n".join(lines))
+            if path:
+                info_popup("导出成功", "「%s」的详情已保存到：\n%s" % (room, path))
+            else:
+                self.toast("导出失败：没有可写的存储目录")
+
+        info_popup("%s · 房间详情" % room, "\n".join(lines),
+                   extra_btn=("导出为 TXT", do_export))
 
     def open_tenant_form(self, room):
         self.store.load()
@@ -1488,10 +1559,17 @@ class BaozupoApp(App):
         t = self.store.current_tenant(room)
         h = self.store.find_house(room)
         suggest = str(h.get("price", "")) if h else ""
+        # 本月已收过就在标题上先预警，别等提交才说
+        this_month = datetime.now().strftime("%Y-%m")
+        paid_this_month = [p for p in self.store.pays_of(room)
+                           if str(p.get("date", ""))[:7] == this_month]
         fields = [
             {"key": "money", "label": "缴费金额", "kind": "text", "value": suggest, "hint": "元"},
             {"key": "date", "label": "缴费日期", "kind": "text", "value": today_str(), "hint": "YYYY-MM-DD"},
         ]
+        title = "房租缴费 - %s%s%s" % (
+            room, ("  (%s)" % t["name"]) if t else "",
+            "  ·本月已收" if paid_this_month else "")
 
         def submit(v):
             money, date = v.get("money", ""), v.get("date", "")
@@ -1503,17 +1581,40 @@ class BaozupoApp(App):
             except Exception:
                 self.toast("日期格式应为 YYYY-MM-DD")
                 return False
-            self.store.load()
-            self.store.data["payments"].append({
-                "room": room, "name": (self.store.current_tenant(room) or {}).get("name", "未知"),
-                "money": money, "date": date})
-            self.store.save()
-            self.refresh_houses()
-            self.toast("收租成功：%s 元" % money)
+
+            def do_add():
+                self.store.load()
+                self.store.data["payments"].append({
+                    "room": room, "name": (self.store.current_tenant(room) or {}).get("name", "未知"),
+                    "money": money, "date": date})
+                self.store.save()
+                self.refresh_houses()
+                if dup:
+                    self.toast("已补记：%s %s 元\n（该月原来已收 %s 元）"
+                               % (date, money, "、".join(str(p.get("money", "")) for p in dup)))
+                else:
+                    self.toast("收租成功：%s 元" % money)
+                dlg.dismiss()
+
+            # 同月重复收租：明确告知上次金额/日期，要确认才入账（防手抖记两笔）
+            dup = [p for p in self.store.pays_of(room)
+                   if str(p.get("date", ""))[:7] == date[:7]]
+            if dup:
+                confirm_popup(
+                    "重复收租？",
+                    "「%s」在 %s 已经记过 %d 笔：\n%s\n\n"
+                    "现在还要再记 %s 元（%s）吗？\n"
+                    "（如果是补差价 / 分批收，点「仍然记录」；\n  手滑了就点「取消」）"
+                    % (room, date[:7], len(dup),
+                       "\n".join("· %s  %s元" % (p.get("date", ""), p.get("money", "")) for p in dup),
+                       money, date),
+                    lambda: do_add(), yes_text="仍然记录")
+                return False      # 先不关表单，等用户确认
+            do_add()
             return True
 
-        FormDialog("房租缴费 - %s%s" % (room, ("  (%s)" % t["name"]) if t else ""),
-                   fields, submit).open()
+        dlg = FormDialog(title, fields, submit)
+        dlg.open()
 
     def open_util_form(self, room):
         self.store.load()
@@ -1664,8 +1765,9 @@ class BaozupoApp(App):
         self.store.load()
         scr = self.sm.get_screen("mine")
         scr.ids.count.text = "登录账号：%s" % (self.login_user or "-")
-        scr.ids.info.text = ("%s v%s\n数据文件：%s\n字体：%s" % (
-            APP_NAME, VERSION, DATA_FILE, FONT_PATH or "未找到中文字体"))
+        # 数据文件路径统一只在「关于」里显示（见 about()）
+        scr.ids.info.text = ("%s v%s\n字体：%s" % (
+            APP_NAME, VERSION, FONT_PATH or "未找到中文字体"))
 
     def open_warn_setting(self, tenant=None):
         sett = self.store.settings
@@ -1863,8 +1965,9 @@ class BaozupoApp(App):
         info_popup("关于", "%s\n版本 v%s\n作者 %s\n联系方式 %s\n\n"
                            "· 电脑版与手机版数据格式完全通用，可互相导入导出\n"
                            "· 数据保存在手机应用私有目录，卸载 App 会一并删除\n"
-                           "· 建议定期「导出备份」并把文件传到电脑留档"
-                           % (APP_NAME, VERSION, AUTHOR, CONTACT))
+                           "· 建议定期「导出备份」并把文件传到电脑留档\n\n"
+                           "【数据文件位置】\n%s"
+                           % (APP_NAME, VERSION, AUTHOR, CONTACT, DATA_FILE))
 
     # ------------------------------------------------------------------ 异常兜底
     def handle_exception(self, inst, exc):
