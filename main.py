@@ -354,7 +354,7 @@ except Exception as _e:
 # 一、基础信息与主题色
 # ==============================================================================
 APP_NAME = "包租婆出租屋管家"
-VERSION = "2.1.0"
+VERSION = "2.1.2"
 AUTHOR = "Paul"
 CONTACT = "15880355384"
 
@@ -701,6 +701,8 @@ class HouseCard(RecycleDataViewBehavior, BoxLayout):
     line2 = StringProperty("")
     line3 = StringProperty("")
     line4 = StringProperty("")
+    # 没有在租租客时，卡片上的「收租 / 水电」按钮置灰，避免空闲房凭空缴费
+    has_tenant = BooleanProperty(False)
     card_bg = ListProperty([1, 1, 1, 1])
     tag_bg = ListProperty([0.29, 0.49, 0.35, 1])
     tag_fg = ListProperty([1, 1, 1, 1])
@@ -814,6 +816,26 @@ def mk_spinner(values, text=""):
                    size_hint_y=None, height=dp(44), font_size=sp(15), color=C_TEXT)
 
 
+def text_lines_h(text, font_size, max_w, min_h=0):
+    """按 max_w 宽度排版后，这段文字实际要占多少像素高。
+
+    为什么必须量：表单里的字段标签是「固定 height」的 Label，Kivy 既不裁剪也不撑高，
+    一旦中文长标签（如「入住日期 YYYY-MM-DD」「月租金元（只填数字）」）在半宽格里
+    折行，第二行会直接画到下边的输入框上 —— 真机上看到的就是「字重叠」。
+    提早按真实排版量出高度把行高留够，桌面和手机都不会挤。
+    """
+    if not text or max_w <= 1:
+        return max(min_h, font_size * 1.4)
+    try:
+        from kivy.core.text import Label as CoreLabel
+        probe = CoreLabel(text=text, font_size=font_size, text_size=(max_w, None))
+        probe.refresh()
+        h = probe.texture.size[1] if probe.texture else 0
+        return max(min_h, h)
+    except Exception:
+        return max(min_h, font_size * 1.4)
+
+
 class FormDialog(Popup):
     """通用表单弹窗：每个字段「标签在上、输入框在下」，手机上最清晰
     fields = [{key,label,kind,values,value,hint,readonly,half,on_change}]
@@ -822,46 +844,61 @@ class FormDialog(Popup):
       on_change : 下拉框选中后的回调 (widget, text, all_widgets)
     """
 
-    # 注意：这里不能写死像素。曾写成 ROW_H = 68（原始像素），在 density≈2.75
+    # 注意：整体尺寸不能写死像素。曾写成 ROW_H = 68（原始像素），在 density≈2.75
     # 的真机上 68px 根本装不下 dp(20) 的标签 + dp(44) 的输入框（共约 175px），
     # 于是「添加房间 / 修改密码 / 全局提醒设置」的表单全部挤在一起重叠。
-    # 现在改为实例化时用 dp() 计算，桌面（density=1）与手机表现一致。
+    # 现在全部改为实例化时用 dp() 计算，桌面（density=1）与手机表现一致。
+
+    POPUP_W = 0.94          # 与下面 self.size_hint_x 保持一致
 
     def __init__(self, title, fields, on_submit, submit_text="保存", **kw):
         super(FormDialog, self).__init__(**kw)
-        self.lab_h = dp(20)                           # 字段标签高
         self.ctl_h = dp(44)                           # 输入框 / 下拉框高
-        self.row_h = self.lab_h + self.ctl_h + dp(6)  # 单行字段总高
         self.title = title
         self.title_size = sp(16)
         self.auto_dismiss = False
         self._on_submit = on_submit
         self._widgets = {}
 
+        # 预先算出「全宽 / 半宽」两种格子各自有多少横向空间，用来预判标签是否折行
+        inner_w = Window.width * self.POPUP_W - dp(16)      # root 左右各 dp(8) padding
+        half_w = (inner_w - dp(8)) / 2.0                    # 半宽行内部 spacing dp(8)
+
         grid = GridLayout(cols=1, spacing=dp(4), size_hint_y=None, padding=[0, 0])
         grid.bind(minimum_height=grid.setter("height"))
-        pending = None
-        for f in fields:
-            cell = self._make_cell(f)
-            if f.get("half"):
-                if pending is None:
-                    pending = BoxLayout(orientation="horizontal", size_hint_y=None,
-                                        height=self.row_h, spacing=dp(8))
-                    pending.add_widget(cell)
-                    grid.add_widget(pending)
-                else:
-                    pending.add_widget(cell)
-                    pending = None
-            else:
-                if pending is not None:
-                    pending.add_widget(Widget())
-                    pending = None
-                grid.add_widget(cell)
 
-        row_count = len(grid.children)
-        body_h = dp(74) + self.row_h * row_count + dp(56)
+        cells = [(f, self._make_cell(f, half_w if f.get("half") else inner_w))
+                 for f in fields]
+
+        i = 0
+        while i < len(cells):
+            f, cell = cells[i]
+            nxt = cells[i + 1] if i + 1 < len(cells) else None
+            if f.get("half"):
+                row_h = cell.height
+                if nxt is not None and nxt[0].get("half"):
+                    row_h = max(cell.height, nxt[1].height)
+                    cell.height = nxt[1].height = row_h
+                    row = BoxLayout(orientation="horizontal", size_hint_y=None,
+                                    height=row_h, spacing=dp(8))
+                    row.add_widget(cell)
+                    row.add_widget(nxt[1])
+                    grid.add_widget(row)
+                    i += 2
+                    continue
+                row = BoxLayout(orientation="horizontal", size_hint_y=None,
+                                height=row_h, spacing=dp(8))
+                row.add_widget(cell)
+                row.add_widget(Widget())
+                grid.add_widget(row)
+                i += 1
+                continue
+            grid.add_widget(cell)
+            i += 1
+
+        body_h = dp(74) + sum(c.height for c in grid.children) + dp(56)
         max_h = Window.height * 0.95
-        self.size_hint = (0.94, None)
+        self.size_hint = (self.POPUP_W, None)
         self.height = min(body_h, max_h)
 
         root = BoxLayout(orientation="vertical", spacing=dp(4),
@@ -886,11 +923,15 @@ class FormDialog(Popup):
         root.add_widget(bar)
         self.content = root
 
-    def _make_cell(self, f):
-        cell = BoxLayout(orientation="vertical", size_hint_y=None, height=self.row_h,
+    def _make_cell(self, f, avail_w):
+        lab_fs = sp(12)
+        lab_h = max(dp(20), text_lines_h(f.get("label", ""), lab_fs, avail_w) + dp(4))
+        row_h = lab_h + self.ctl_h + dp(6)
+        cell = BoxLayout(orientation="vertical", size_hint_y=None, height=row_h,
                          spacing=dp(2))
-        lab = Label(text=f.get("label", ""), size_hint_y=None, height=self.lab_h,
-                    font_size=sp(12), color=POPUP_LABEL_C, halign="left", valign="middle")
+        lab = Label(text=f.get("label", ""), size_hint_y=None, height=lab_h,
+                    font_size=lab_fs, color=POPUP_LABEL_C, halign="left", valign="top",
+                    shorten=True, shorten_from="right")
         lab.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
         cell.add_widget(lab)
         if f.get("kind") == "combo":
@@ -922,8 +963,13 @@ def info_popup(title, message, on_close=None, btn="知道了", extra_btn=None):
     lab.bind(texture_size=lambda w, *_: setattr(w, "height", w.texture_size[1]))
     sv.add_widget(lab)
     box.add_widget(sv)
-    p = Popup(title=title, title_size=sp(16), content=box, size_hint=(0.92, 0.7),
-              auto_dismiss=True)
+    # 高度跟着文案走：写死 0.7 屏高时短提示下面一大片空白，长提示又被压扁
+    _w = Window.width * 0.92 - dp(20)
+    _bh = text_lines_h(message, sp(14), _w, min_h=dp(60))
+    _h = min(max(dp(200), _bh + dp(46) + dp(60) + (dp(50) if extra_btn else 0)),
+             Window.height * 0.88)
+    p = Popup(title=title, title_size=sp(16), content=box, size_hint=(0.92, None),
+              height=_h, auto_dismiss=True)
     if extra_btn:
         bar = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
         b2 = Button(text=extra_btn[0], font_size=sp(15),
@@ -948,9 +994,16 @@ def info_popup(title, message, on_close=None, btn="知道了", extra_btn=None):
 
 def confirm_popup(title, message, on_yes, yes_text="确定", danger=False):
     box = BoxLayout(orientation="vertical", spacing=dp(10), padding=dp(10))
-    lab = Label(text=message, font_size=sp(14), color=POPUP_TEXT_C, halign="left", valign="top")
+    # ★ 文案不再「写死 dp(230) 塞进剩余空间」：像「重复收租？」这种会把历史上每笔
+    #   记录逐行列出来的长文案，塞进固定高度就会被压扁成一片重叠。
+    #   现在：文字自己测高 → 包 ScrollView → 弹窗高度跟着文案走（最多占 92% 屏高）。
+    sv = ScrollView(do_scroll_x=False)
+    lab = Label(text=message, size_hint_y=None, font_size=sp(14), color=POPUP_TEXT_C,
+                halign="left", valign="top")
     lab.bind(width=lambda w, *_: setattr(w, "text_size", (w.width, None)))
-    box.add_widget(lab)
+    lab.bind(texture_size=lambda w, *_: setattr(w, "height", w.texture_size[1]))
+    sv.add_widget(lab)
+    box.add_widget(sv)
     bar = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
     b_no = Button(text="取消", font_size=sp(15), background_color=BTN_NEUTRAL_C,
                   color=(1, 1, 1, 1))
@@ -959,8 +1012,14 @@ def confirm_popup(title, message, on_yes, yes_text="确定", danger=False):
     bar.add_widget(b_no)
     bar.add_widget(b_yes)
     box.add_widget(bar)
+
+    body_w = Window.width * 0.9 - dp(20)
+    body_h = text_lines_h(message, sp(14), body_w, min_h=dp(60))
+    # 余量给足（标题栏 + 按钮栏 + 内边距 + 半行），否则最后一行会被切一半
+    h = min(max(dp(260), body_h + dp(48) + dp(88)), Window.height * 0.92)
+
     p = Popup(title=title, title_size=sp(16), content=box, size_hint=(0.9, None),
-              height=dp(230), auto_dismiss=False)
+              height=h, auto_dismiss=False)
     b_no.bind(on_release=lambda *_: p.dismiss())
     b_yes.bind(on_release=lambda *_: (p.dismiss(), on_yes()))
     p.open()
@@ -1224,6 +1283,7 @@ class BaozupoApp(App):
                 line4 = (line4 + "   最近收租 " + str(pays[-1].get("date", ""))).strip()
             rows.append({
                 "room": room, "address": str(h.get("address", "")), "status": st,
+                "has_tenant": bool(t),
                 "line1": "%s㎡ · %s元/月 · %s" % (h.get("area", ""), h.get("price", ""), fac),
                 "line2": line2, "line3": line3, "line4": line4,
                 "tag_bg": list(C_ACCENT) if rented else [0.61, 0.67, 0.65, 1],
@@ -1286,11 +1346,11 @@ class BaozupoApp(App):
              "value": base["addr"], "hint": "例如 上富佳苑"},
             {"key": "pick", "label": "已有小区快速带入（选填）", "kind": "combo",
              "values": ["不选择"] + addrs, "value": "不选择", "on_change": fill_by_addr},
-            {"key": "room", "label": "房间号（可修改）", "kind": "text", "value": base["room"],
+            {"key": "room", "label": "房间号", "kind": "text", "value": base["room"],
              "half": True},
-            {"key": "area", "label": "面积㎡（只填数字）", "kind": "text",
+            {"key": "area", "label": "面积（㎡）", "kind": "text",
              "value": base["area"], "half": True},
-            {"key": "price", "label": "月租金元（只填数字）", "kind": "text",
+            {"key": "price", "label": "月租金（元）", "kind": "text",
              "value": base["price"], "half": True},
             {"key": "status", "label": "状态", "kind": "combo", "values": ["空闲", "已租"],
              "value": base["status"], "half": True},
@@ -1503,13 +1563,16 @@ class BaozupoApp(App):
                          "deposit": str(t.get("deposit", ""))})
 
         fields = [
-            {"key": "name", "label": "租客姓名", "kind": "text", "value": base["name"], "half": True},
-            {"key": "tel", "label": "联系电话", "kind": "text", "value": base["tel"], "half": True},
-            {"key": "in_date", "label": "入住日期 YYYY-MM-DD", "kind": "text",
-             "value": base["in_date"], "half": True},
+            {"key": "name", "label": "租客姓名", "kind": "text", "value": base["name"],
+             "hint": "必填", "half": True},
+            {"key": "tel", "label": "联系电话", "kind": "text", "value": base["tel"],
+             "hint": "必填", "half": True},
+            {"key": "in_date", "label": "入住日期", "kind": "text",
+             "value": base["in_date"], "hint": "YYYY-MM-DD", "half": True},
             {"key": "rent_type", "label": "租期类型", "kind": "combo", "values": ["月租", "年租"],
              "value": base["rent_type"], "half": True},
-            {"key": "deposit", "label": "押金（元）", "kind": "text", "value": base["deposit"], "half": True},
+            {"key": "deposit", "label": "押金（元）", "kind": "text", "value": base["deposit"],
+             "hint": "只填数字", "half": True},
         ]
 
         def submit(v):
@@ -1554,22 +1617,55 @@ class BaozupoApp(App):
 
         FormDialog("租客登记 - %s" % room, fields, submit).open()
 
-    def open_pay_form(self, room):
+    def require_tenant(self, room, action="缴费"):
+        """取该房当前在租的租客。
+
+        空闲房（或状态是「已租」但没登记过租客）——不能收费/记水电，
+        因为没租客就没法把这笔账挂到谁头上。这里统一拦下来并引导去登记。
+        返回租客 dict；没有则返回 None。
+        """
         self.store.load()
         t = self.store.current_tenant(room)
+        if t:
+            return t
+        box = {}
+
+        def go_regist():
+            if box.get("p"):
+                box["p"].dismiss()
+            self.open_tenant_form(room)
+
+        box["p"] = info_popup(
+            "请添加租客",
+            "「%s」现在没有在租的租客，无法%s。\n\n"
+            "请先在「租客登记」里把租客姓名、电话、\n"
+            "入住日期、押金登记好，之后就能%s了。" % (room, action, action),
+            btn="知道了", extra_btn=("去登记租客", go_regist))
+        return None
+
+    def open_pay_form(self, room):
+        self.store.load()
+        # ★ 空闲房不允许收租：没有租客就先引导去登记，不再直接进表单
+        t = self.require_tenant(room, "收租")
+        if not t:
+            return
         h = self.store.find_house(room)
         suggest = str(h.get("price", "")) if h else ""
         # 本月已收过就在标题上先预警，别等提交才说
         this_month = datetime.now().strftime("%Y-%m")
         paid_this_month = [p for p in self.store.pays_of(room)
                            if str(p.get("date", ""))[:7] == this_month]
+        who = "%s  %s" % (t.get("name", ""), t.get("tel", ""))
         fields = [
-            {"key": "money", "label": "缴费金额", "kind": "text", "value": suggest, "hint": "元"},
-            {"key": "date", "label": "缴费日期", "kind": "text", "value": today_str(), "hint": "YYYY-MM-DD"},
+            {"key": "who", "label": "租客（自动带入）", "kind": "text",
+             "value": who.strip(), "readonly": True},
+            {"key": "money", "label": "缴费金额", "kind": "text", "value": suggest,
+             "hint": "元", "half": True},
+            {"key": "date", "label": "缴费日期", "kind": "text", "value": today_str(),
+             "hint": "YYYY-MM-DD", "half": True},
         ]
-        title = "房租缴费 - %s%s%s" % (
-            room, ("  (%s)" % t["name"]) if t else "",
-            "  ·本月已收" if paid_this_month else "")
+        title = "房租缴费 - %s (%s)%s" % (
+            room, t.get("name", ""), "  ·本月已收" if paid_this_month else "")
 
         def submit(v):
             money, date = v.get("money", ""), v.get("date", "")
@@ -1584,8 +1680,12 @@ class BaozupoApp(App):
 
             def do_add():
                 self.store.load()
+                # 用表单打开那一刻带出来的租客，避免中途又被改成别的人
+                cur = self.store.current_tenant(room) or {}
                 self.store.data["payments"].append({
-                    "room": room, "name": (self.store.current_tenant(room) or {}).get("name", "未知"),
+                    "room": room,
+                    "name": cur.get("name") or t.get("name", "未知"),
+                    "tel": cur.get("tel") or t.get("tel", ""),
                     "money": money, "date": date})
                 self.store.save()
                 self.refresh_houses()
@@ -1618,13 +1718,23 @@ class BaozupoApp(App):
 
     def open_util_form(self, room):
         self.store.load()
+        # ★ 空闲房不能记水电：没有租客就没人对得上这笔账
+        t = self.require_tenant(room, "记录水电")
+        if not t:
+            return
         us = self.store.utils_of(room)
         last = us[-1] if us else {}
         fields = [
+            {"key": "who", "label": "租客（自动带入）", "kind": "text",
+             "value": ("%s  %s" % (t.get("name", ""), t.get("tel", ""))).strip(),
+             "readonly": True},
             {"key": "month", "label": "统计月份", "kind": "text",
-             "value": str(last.get("month") or datetime.now().strftime("%Y-%m")), "hint": "YYYY-MM"},
-            {"key": "elec", "label": "电费", "kind": "text", "value": str(last.get("elec", "")), "hint": "元"},
-            {"key": "water", "label": "水费", "kind": "text", "value": str(last.get("water", "")), "hint": "元"},
+             "value": str(last.get("month") or datetime.now().strftime("%Y-%m")),
+             "hint": "YYYY-MM"},
+            {"key": "elec", "label": "电费", "kind": "text", "value": str(last.get("elec", "")),
+             "hint": "元", "half": True},
+            {"key": "water", "label": "水费", "kind": "text", "value": str(last.get("water", "")),
+             "hint": "元", "half": True},
         ]
 
         def submit(v):
@@ -1640,13 +1750,14 @@ class BaozupoApp(App):
                 u for u in self.store.data["utilities"]
                 if not (str(u.get("room")) == str(room) and str(u.get("month")) == month)]
             self.store.data["utilities"].append(
-                {"room": room, "month": month, "elec": elec, "water": water})
+                {"room": room, "month": month, "elec": elec, "water": water,
+                 "name": t.get("name", ""), "tel": t.get("tel", "")})
             self.store.save()
             self.refresh_houses()
             self.toast("水电记录已保存")
             return True
 
-        FormDialog("水电记录 - %s" % room, fields, submit).open()
+        FormDialog("水电记录 - %s (%s)" % (room, t.get("name", "")), fields, submit).open()
 
     def do_evict(self, room):
         def yes():

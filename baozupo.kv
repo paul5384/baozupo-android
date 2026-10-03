@@ -415,12 +415,14 @@
             font_size: sp(12)
             background_color: C_INFO
             color: (1, 1, 1, 1)
+            disabled: not root.has_tenant
             on_release: app.house_action('pay', root.room)
         Button:
             text: '水电'
             font_size: sp(12)
             background_color: 0.541, 0.427, 0.231, 1
             color: (1, 1, 1, 1)
+            disabled: not root.has_tenant
             on_release: app.house_action('util', root.room)
         Button:
             text: '更多'
