@@ -6,8 +6,6 @@ on:
   workflow_dispatch:
   push:
     branches: [ issue-apk ]
-    paths:
-      - 'issue/**'
 
 jobs:
   build-issue-apk:
