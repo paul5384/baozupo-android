@@ -13,10 +13,13 @@
 """
 
 import os
+import re
 import sys
 import time
 import json
 import io
+import random
+import hashlib
 import traceback
 from datetime import datetime, timedelta
 
@@ -354,7 +357,7 @@ except Exception as _e:
 # 一、基础信息与主题色
 # ==============================================================================
 APP_NAME = "包租婆出租屋管家"
-VERSION = "2.1.3"
+VERSION = "2.1.4"
 AUTHOR = "Paul"
 CONTACT = "15880355384"
 
@@ -462,6 +465,77 @@ DATA_FILE = os.path.join(app_data_dir(), "baozupo_data.json")
 _diag_report("S4 数据目录就绪", "DATA_FILE=%s" % DATA_FILE)
 
 # ==============================================================================
+# 三·一、收费版 / 授权
+# ------------------------------------------------------------------------------
+# 本 App 是纯本地单机程序（没有服务器），所以付款结果无法自动回传。
+# 采用「收款码 + 激活码」的离线方案：
+#   1) 用户在「我的 → 升级 / 支持作者」里扫码付款；
+#   2) 加作者微信发截图，把页面上显示的「设备码」一起发过来；
+#   3) 作者用《授权码生成器.html》按设备码生成激活码，回发给用户；
+#   4) 用户在 App 内输入激活码 → 本地校验（SHA-256 派生）→ 解锁付费功能。
+# 校验完全离线，不需要联网、不需要服务器。
+# ==============================================================================
+# 收款码 / 名片二维码（放在 assets 下，随 APK 一起打包）
+QR_PAY_IMG = os.path.join(BASE_DIR, "assets", "wx_pay.jpg")     # 微信收款码
+QR_CARD_IMG = os.path.join(BASE_DIR, "assets", "wx_card.jpg")   # 微信名片（加好友）
+
+# 【重要】激活码密钥：必须与《授权码生成器.html》里的 SECRET 完全一致。
+# 改动这一行会让之前发出去的所有激活码失效，非必要不要改。
+LICENSE_SECRET = "BZP-RENT-2026-PAUL"
+LICENSE_FILE = os.path.join(app_data_dir(), "baozupo_license.json")
+
+PRICE_TEXT = "29.9"           # 升级页显示的价格（纯文案，收款码本身不含金额）
+FREE_REMINDER_ROWS = 3        # 免费版在首页能看到的「到期提醒」条数
+
+# 激活码用字符集：去掉 0/O/1/I/L 等肉眼易混的字符，方便用户手输 / 微信转述
+_LIC_CHARS = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
+
+
+def _lic_encode(seed_text, n=16):
+    """由 seed 派生 n 位码（SHA-256 → 字符集）。同 seed 必得同结果"""
+    h = hashlib.sha256(seed_text.encode("utf-8")).hexdigest().upper()
+    return "".join(_LIC_CHARS[int(h[i:i + 2], 16) % len(_LIC_CHARS)]
+                   for i in range(0, n * 2, 2))
+
+
+def lic_device_new():
+    """新建设备码（8 位，显示成 XXXX-XXXX）"""
+    return "".join(random.choice(_LIC_CHARS) for _ in range(8))
+
+
+def lic_fmt(group):
+    """ABCDEFGH -> ABCD-EFGH"""
+    return "-".join(group[i:i + 4] for i in range(0, len(group), 4))
+
+
+def lic_code_for_device(device):
+    """设备专属激活码：BZP-XXXX-XXXX-XXXX-XXXX"""
+    return "BZP-" + lic_fmt(_lic_encode(LICENSE_SECRET + "|DEV|" + (device or "").upper()))
+
+
+def lic_code_universal():
+    """通用激活码：换机 / 重装也能用（作者可选发这种，省事但可能被转手）"""
+    return "BZP-" + lic_fmt(_lic_encode(LICENSE_SECRET + "|ANY|"))
+
+
+def lic_normalize(s):
+    """把用户输入揉成纯大写字母数字：忽略 BZP 前缀、横线、空格、大小写"""
+    s = re.sub(r"[^0-9A-Za-z]", "", s or "").upper()
+    if s.startswith("BZP"):
+        s = s[3:]
+    return s
+
+
+def lic_check(inp, device):
+    """校验输入码对本机是否有效"""
+    key = lic_normalize(inp)
+    if len(key) < 12:
+        return False
+    return key in {lic_normalize(lic_code_for_device(device)),
+                   lic_normalize(lic_code_universal())}
+
+
+# ==============================================================================
 # 四、数据层
 # ==============================================================================
 EMPTY_DATA = {"houses": [], "tenants": [], "payments": [], "utilities": []}
@@ -544,7 +618,10 @@ class Store(object):
         self.settings = {"month_advance": 1, "year_advance": 7,
                          "price_water": 3.5, "price_elec": 0.65}
         self.users = []
+        self.lic = {}
+        self._lic_ready = False
         self.load()
+        self.lic_load()
 
     # ---------- 读写 ----------
     def load(self):
@@ -584,6 +661,57 @@ class Store(object):
     def payload(self):
         return {"data": self.data, "settings": self.settings, "users": self.users,
                 "app": "baozupo", "version": VERSION, "export_time": now_str()}
+
+    # ---------- 授权（收费版） ----------
+    # 授权信息存在独立的 baozupo_license.json 里，和业务数据分开：
+    # 「清空所有业务数据」不会把已付费的授权一起清掉。
+    def lic_load(self, force=False):
+        if self._lic_ready and not force:
+            return self.lic
+        try:
+            if os.path.exists(LICENSE_FILE):
+                with open(LICENSE_FILE, "r", encoding="utf-8") as f:
+                    d = json.load(f)
+                if isinstance(d, dict):
+                    self.lic = d
+        except Exception:
+            pass
+        if not isinstance(self.lic, dict):
+            self.lic = {}
+        self._lic_ready = True
+        # 设备码：首次运行生成一次，之后固定不变（客户重装/换机会变，需重新发码）
+        if not self.lic.get("device"):
+            self.lic["device"] = lic_device_new()
+            self.lic_save()
+        return self.lic
+
+    def lic_save(self):
+        try:
+            with open(LICENSE_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.lic, f, ensure_ascii=False, indent=2)
+            return True
+        except Exception:
+            return False
+
+    @property
+    def device_id(self):
+        return self.lic_load().get("device", "")
+
+    @property
+    def paid(self):
+        """是否已解锁付费版"""
+        return bool(self.lic_load().get("activated"))
+
+    def try_activate(self, code):
+        """校验激活码并落盘。成功 True，失败 False（不改动任何状态）"""
+        if not lic_check(code, self.device_id):
+            return False
+        self.lic["activated"] = True
+        self.lic["code"] = (code or "").strip().upper()
+        self.lic["at"] = now_str()
+        self.lic["device"] = self.device_id
+        self.lic_save()
+        return True
 
     # ---------- 查询 ----------
     def houses(self):
@@ -1296,18 +1424,24 @@ class BaozupoApp(App):
         except Exception:
             pass
 
-        # 到期提醒
+        # 到期提醒（付费功能：免费版只给条数汇总，付费版列具体明细）
         rem = self.store.reminders()
+        paid = self.store.paid
         body.add_widget(self._section("到期提醒", "%d 条" % len(rem)))
         if not rem:
             body.add_widget(self._hint("暂无临近到期的租客"))
-        else:
+        elif paid:
             for room, name, od, left in rem[:8]:
                 txt = "%s · %s    到期 %s    %s" % (
                     room, name, od,
                     ("已过期 %d 天" % -left) if left < 0 else ("还剩 %d 天" % left))
                 bg = (0.99, 0.92, 0.92, 1) if left < 0 else (0.99, 0.97, 0.89, 1)
                 body.add_widget(self._row_card(txt, bg))
+        else:
+            body.add_widget(self._row_card(
+                "有 %d 位租客临近到期（免费版只显示条数）" % len(rem),
+                (0.99, 0.97, 0.89, 1)))
+            body.add_widget(self._upgrade_row("升级后可看到期房号 / 姓名 / 剩余天数"))
 
         # 快捷操作（含全局搜索）
         body.add_widget(self._section("快捷操作", ""))
@@ -1505,6 +1639,8 @@ class BaozupoApp(App):
 
     def export_stats(self, *a):
         """导出当前统计区间的汇总 + 明细流水为 CSV（Excel 直接可开）"""
+        if not self.need_paid("导出统计报表"):
+            return
         self.store.load()
         import csv as _csv
         prefix = self.stat_range_prefix()
@@ -1801,6 +1937,8 @@ class BaozupoApp(App):
 
     def export_tenants_csv(self, *a):
         """导出全部租客（含历史）为 CSV，Excel/WPS 可直接打开。"""
+        if not self.need_paid("导出租客名单"):
+            return
         self.store.load()
         import csv as _csv
         buf = io.StringIO()
@@ -1873,6 +2011,8 @@ class BaozupoApp(App):
             lines.append("· %s  电费 %s元  水费 %s元" % (u.get("month", ""), u.get("elec", ""), u.get("water", "")))
 
         def do_export():
+            if not self.need_paid("导出房间详情"):
+                return
             name = "房间%s_详情_%s.txt" % (room.replace("/", "-"),
                                           datetime.now().strftime("%Y%m%d_%H%M"))
             path = self._write_public(name, "\n".join(lines))
@@ -1882,7 +2022,8 @@ class BaozupoApp(App):
                 self.toast("导出失败：没有可写的存储目录")
 
         info_popup("%s · 房间详情" % room, "\n".join(lines),
-                   extra_btn=("导出为 TXT", do_export))
+                   extra_btn=(("导出为 TXT" if self.store.paid else "导出为 TXT（付费版）"),
+                              do_export))
 
     def open_tenant_form(self, room):
         self.store.load()
@@ -2205,6 +2346,235 @@ class BaozupoApp(App):
         scr.ids.rv.data = rows
         scr.ids.count.text = "在租 %d 人 · 历史 %d 人" % (len(live), len(hist))
 
+    # ------------------------------------------------------- 收费版 / 联系作者
+    def _img_size(self, path):
+        """读图片像素尺寸（用来按比例排版，避免拉伸变形）"""
+        try:
+            from kivy.core.image import Image as CoreImage
+            t = CoreImage(path).texture
+            if t and t.size and t.size[0]:
+                return int(t.size[0]), int(t.size[1])
+        except Exception:
+            pass
+        return 0, 0
+
+    def copy_text(self, s, tip="已复制"):
+        try:
+            Clipboard.copy(str(s))
+            self.toast(tip)
+        except Exception as e:
+            self.toast("复制失败：%s" % e)
+
+    def show_qr_popup(self, title, img_path, message, extra=None):
+        """通用「二维码图 + 说明」弹窗：图按原始比例缩放，文字可滚动，extra 追加按钮"""
+        from kivy.uix.image import Image
+        box = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
+        sv = ScrollView(do_scroll_x=False)
+        inner = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(10),
+                          padding=[0, 0, 0, dp(22)])   # 底部留白，免得末行贴着按钮栏
+        inner.bind(minimum_height=inner.setter("height"))
+
+        avail_w = Window.width * 0.94 - dp(24)
+        iw, ih = self._img_size(img_path)
+        if iw and ih:
+            img_h = avail_w * ih / float(iw)
+            # 图片最多占 0.46 屏高：留足空间给说明文字，否则最后几行会被按钮栏压住
+            max_h = Window.height * 0.46
+            if img_h > max_h:
+                img_h = max_h
+        else:
+            img_h = dp(300)
+        if os.path.exists(img_path):
+            inner.add_widget(Image(source=img_path, size_hint=(1, None), height=img_h,
+                                   fit_mode="contain"))
+        else:
+            inner.add_widget(Label(text="（二维码图片缺失：%s）" % img_path,
+                                   size_hint_y=None, height=dp(40), font_size=sp(12),
+                                   color=(1, 0.6, 0.6, 1)))
+
+        lab = Label(text=message, size_hint_y=None, font_size=sp(13), color=POPUP_TEXT_C,
+                    halign="left", valign="top")
+        lab.bind(width=lambda w, *_: setattr(w, "text_size", (w.width, None)))
+        lab.bind(texture_size=lambda w, *_: setattr(w, "height", w.texture_size[1]))
+        inner.add_widget(lab)
+        sv.add_widget(inner)
+        box.add_widget(sv)
+
+        bar = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
+        b_close = Button(text="关闭", size_hint_x=0.42, font_size=sp(14),
+                         background_color=BTN_NEUTRAL_C, color=(1, 1, 1, 1))
+        bar.add_widget(b_close)
+        for txt, cb in (extra or []):
+            b = Button(text=txt, font_size=sp(14), background_color=C_INFO, color=(1, 1, 1, 1))
+            b.bind(on_release=lambda inst, f=cb: f())
+            bar.add_widget(b)
+        box.add_widget(bar)
+
+        body_h = img_h + text_lines_h(message, sp(13), avail_w, min_h=dp(60)) + dp(26)
+        pop_h = min(max(dp(360), body_h + dp(46) + dp(86)), Window.height * 0.94)
+        p = Popup(title=title, title_size=sp(16), content=box,
+                  size_hint=(0.94, None), height=pop_h, auto_dismiss=True)
+        b_close.bind(on_release=lambda *_: p.dismiss())
+        p.open()
+        return p
+
+    def open_contact(self, *a):
+        """联系作者：微信名片二维码 + 手机号（可复制）"""
+        msg = ("扫上面的二维码加作者微信（手机号同号）。\n"
+               "付款后请把「升级付费版」页的【设备码】发我，我回你激活码。\n"
+               "使用问题、功能建议，也欢迎直接找我。\n\n"
+               "手机号 / 微信号：%s" % CONTACT)
+        return self.show_qr_popup("联系作者", QR_CARD_IMG, msg,
+                                  extra=[("复制手机号", lambda: self.copy_text(
+                                      CONTACT, "手机号已复制：%s" % CONTACT))])
+
+    def need_paid(self, what="该功能"):
+        """付费闸门：已解锁返回 True；未解锁弹升级引导并返回 False"""
+        try:
+            if self.store.paid:
+                return True
+        except Exception:
+            return True
+        confirm_popup(
+            "升级付费版",
+            "「%s」是付费版功能。\n\n"
+            "免费版可用：房屋管理、租客登记、收租记账、水电记录、搜索、统计查看。\n\n"
+            "升级后解锁：\n"
+            "  · 导出 / 导入数据备份\n"
+            "  · 导出租客名单（Excel 可直接打开）\n"
+            "  · 导出统计报表（按月 / 按年）\n"
+            "  · 房间详情导出为 TXT\n"
+            "  · 首页到期提醒的完整明细\n\n"
+            "付费一次，长期使用。" % what,
+            lambda: self.open_support(), yes_text="去升级")
+        return False
+
+    def _upgrade_row(self, text):
+        """首页/列表里提示升级的可点条目"""
+        b = Button(text="■ %s  →  点此升级" % text, size_hint_y=None, height=dp(42),
+                   font_size=sp(13), background_color=(0.85, 0.72, 0.35, 1),
+                   color=(1, 1, 1, 1))
+        b.bind(on_release=lambda *_: self.open_support())
+        return b
+
+    def open_support(self, *a):
+        """升级 / 支持作者：收款码 + 设备码 + 激活码输入"""
+        from kivy.uix.image import Image
+        self.store.lic_load()
+        paid = self.store.paid
+        dev = lic_fmt(self.store.device_id or "")
+
+        box = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
+        sv = ScrollView(do_scroll_x=False)
+        inner = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(10))
+        inner.bind(minimum_height=inner.setter("height"))
+
+        # 状态条
+        st = Label(text=("★ 付费版已解锁，感谢支持！" if paid else "当前为免费版"),
+                   size_hint_y=None, height=dp(32), font_size=sp(15),
+                   color=(0.55, 0.95, 0.65, 1) if paid else (1, 0.85, 0.5, 1),
+                   halign="center", valign="middle")
+        st.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
+        inner.add_widget(st)
+
+        # 收款码
+        avail_w = Window.width * 0.94 - dp(24)
+        iw, ih = self._img_size(QR_PAY_IMG)
+        # 收款码最多 0.40 屏高，把剩下的空间留给说明文字和激活输入框
+        img_h = min(avail_w * ih / float(iw), Window.height * 0.40) if (iw and ih) else dp(280)
+        if os.path.exists(QR_PAY_IMG):
+            inner.add_widget(Image(source=QR_PAY_IMG, size_hint=(1, None), height=img_h,
+                                   fit_mode="contain"))
+        else:
+            inner.add_widget(Label(text="（收款码图片缺失：%s）" % QR_PAY_IMG,
+                                   size_hint_y=None, height=dp(40), font_size=sp(12),
+                                   color=(1, 0.6, 0.6, 1)))
+
+        tips = ("扫码付款 ￥%s 支持作者，解锁以下高级功能：\n"
+                "  · 导出 / 导入数据备份\n"
+                "  · 导出租客名单（Excel 直接打开）\n"
+                "  · 导出统计报表（按月 / 按年）\n"
+                "  · 房间详情导出为 TXT\n"
+                "  · 首页到期提醒显示完整明细\n\n"
+                "【本机设备码】 %s\n"
+                "付款后点「联系作者」加我微信，把设备码发我，\n"
+                "我回你激活码，粘到下面的输入框里点「激活」即可。"
+                % (PRICE_TEXT, dev))
+        lab = Label(text=tips, size_hint_y=None, font_size=sp(12.5), color=POPUP_TEXT_C,
+                    halign="left", valign="top")
+        lab.bind(width=lambda w, *_: setattr(w, "text_size", (w.width, None)))
+        lab.bind(texture_size=lambda w, *_: setattr(w, "height", w.texture_size[1]))
+        inner.add_widget(lab)
+
+        # 设备码本身已写在上面说明里，这里只给一个复制按钮
+        b_cp = Button(text="复制本机设备码（发给作者）", size_hint_y=None, height=dp(44),
+                      font_size=sp(14), background_color=C_INFO, color=(1, 1, 1, 1))
+        b_cp.bind(on_release=lambda *_: self.copy_text(dev, "设备码已复制：%s" % dev))
+        inner.add_widget(b_cp)
+
+        sv.add_widget(inner)
+        box.add_widget(sv)
+
+        # 激活码输入框固定在底部（不放进 ScrollView）——
+        # 否则说明文字一长，输入框就被滚出可视区，用户根本找不到该往哪填。
+        ti = None
+        if not paid:
+            ti = mk_input("在此粘贴激活码（BZP-XXXX-XXXX-XXXX-XXXX）", "")
+            ti.size_hint_y = None
+            ti.height = dp(46)
+            box.add_widget(ti)
+
+        bar = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
+        b_close = Button(text="关闭", font_size=sp(14), background_color=BTN_NEUTRAL_C,
+                         color=(1, 1, 1, 1))
+        b_con = Button(text="联系作者", font_size=sp(14), background_color=C_INFO,
+                       color=(1, 1, 1, 1))
+        b_act = Button(text=("已解锁" if paid else "激活"), font_size=sp(15),
+                       background_color=(0.42, 0.47, 0.45, 1) if paid else C_ACCENT,
+                       color=(1, 1, 1, 1))
+        bar.add_widget(b_close)
+        bar.add_widget(b_con)
+        bar.add_widget(b_act)
+        box.add_widget(bar)
+
+        # 高度按内容算，别写死 0.92 屏：短文案留一大片空白，长文案又把输入框挤出去
+        body_h = (img_h + text_lines_h(tips, sp(12.5), avail_w - dp(8), min_h=dp(120))
+                  + dp(44) + dp(22))
+        extra = 0 if paid else dp(46)
+        pop_h = min(max(dp(440), body_h + dp(46) + extra + dp(74)), Window.height * 0.95)
+        p = Popup(title="升级付费版 / 支持作者", title_size=sp(16), content=box,
+                  size_hint=(0.94, None), height=pop_h, auto_dismiss=False)
+        b_close.bind(on_release=lambda *_: p.dismiss())
+
+        def do_contact(*_):
+            p.dismiss()
+            Clock.schedule_once(lambda *_: self.open_contact(), 0.25)
+
+        def do_activate(*_):
+            if paid:
+                self.toast("已经是付费版了，感谢支持！")
+                return
+            txt = (ti.text or "").strip() if ti else ""
+            if not txt:
+                self.toast("请先填写激活码")
+                return
+            if self.store.try_activate(txt):
+                p.dismiss()
+                self.refresh_mine()
+                self.build_home()
+                info_popup("激活成功",
+                           "付费版已解锁，感谢支持！\n\n"
+                           "现在可以：导出 / 导入数据备份、导出租客名单、\n"
+                           "导出统计报表、导出房间详情、查看全部到期提醒。\n\n"
+                           "本机设备码：%s" % dev)
+            else:
+                self.toast("激活码无效（请核对是否与本机设备码匹配）")
+
+        b_con.bind(on_release=do_contact)
+        b_act.bind(on_release=do_activate)
+        p.open()
+        return p
+
     # ------------------------------------------------------------------ 我的
     def refresh_mine(self):
         if getattr(self, "sm", None) is None:
@@ -2212,6 +2582,20 @@ class BaozupoApp(App):
         self.store.load()
         scr = self.sm.get_screen("mine")
         scr.ids.count.text = "登录账号：%s" % (self.login_user or "-")
+        # 授权状态：按钮文案 + 一行说明（对应 baozupo.kv <MineScreen> 里的 id）
+        paid = self.store.paid
+        try:
+            scr.ids.btn_support.text = ("★ 已解锁付费版 · 点击查看"
+                                        if paid else "★ 升级付费版 / 支持作者")
+        except Exception:
+            pass
+        try:
+            scr.ids.license.text = (
+                "★ 付费版已激活（设备码 %s）" % lic_fmt(self.store.device_id)
+                if paid else
+                "免费版 · 记账 / 收租 / 水电 / 搜索 / 统计查看均免费，导出备份与到期提醒明细需解锁")
+        except Exception:
+            pass
         # 数据文件路径统一只在「关于」里显示（见 about()）
         scr.ids.info.text = ("%s v%s\n字体：%s" % (
             APP_NAME, VERSION, FONT_PATH or "未找到中文字体"))
@@ -2274,6 +2658,9 @@ class BaozupoApp(App):
 
     # ------------------------------------------------------------------ 备份 / 恢复
     def open_backup_menu(self, *a):
+        # 数据备份 / 导入 / 复制到剪贴板 整体属于付费功能
+        if not self.need_paid("数据备份 / 导入"):
+            return
         box = BoxLayout(orientation="vertical", spacing=dp(6), padding=dp(8))
         p = Popup(title="数据备份 / 导入", title_size=sp(16), size_hint=(0.9, 0.72),
                   auto_dismiss=True)
@@ -2409,12 +2796,22 @@ class BaozupoApp(App):
                                  "此操作不可撤销！", yes, yes_text="确认清空", danger=True)
 
     def about(self):
-        info_popup("关于", "%s\n版本 v%s\n作者 %s\n联系方式 %s\n\n"
-                           "· 电脑版与手机版数据格式完全通用，可互相导入导出\n"
-                           "· 数据保存在手机应用私有目录，卸载 App 会一并删除\n"
-                           "· 建议定期「导出备份」并把文件传到电脑留档\n\n"
-                           "【数据文件位置】\n%s"
-                           % (APP_NAME, VERSION, AUTHOR, CONTACT, DATA_FILE))
+        paid = self.store.paid
+        msg = ("%s\n版本 v%s\n作者 %s\n联系方式 %s\n\n"
+               "· 电脑版与手机版数据格式完全通用，可互相导入导出\n"
+               "· 数据保存在手机应用私有目录，卸载 App 会一并删除\n"
+               "· 建议定期「导出备份」并把文件传到电脑留档\n\n"
+               "【授权状态】%s\n"
+               "【设备码】%s\n"
+               "【数据文件位置】\n%s\n\n"
+               "扫上面的二维码即可加作者微信（手机号同号）：\n"
+               "付款解锁、使用问题、功能建议，都直接找我。"
+               % (APP_NAME, VERSION, AUTHOR, CONTACT,
+                  ("付费版已激活 ★" if paid else "免费版（导出备份 / 到期提醒明细需解锁）"),
+                  lic_fmt(self.store.device_id or ""), DATA_FILE))
+        return self.show_qr_popup("关于 / 联系作者", QR_CARD_IMG, msg,
+                                  extra=[("复制手机号", lambda: self.copy_text(
+                                      CONTACT, "手机号已复制：%s" % CONTACT))])
 
     # ------------------------------------------------------------------ 异常兜底
     def handle_exception(self, inst, exc):
