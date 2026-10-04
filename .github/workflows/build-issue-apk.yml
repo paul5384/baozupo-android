@@ -80,18 +80,13 @@ jobs:
           # 清除本机 Windows 路径行，使用容器内置的 SDK/NDK/JDK。
           # 少了这一步，buildozer 会去找 C:/Users/L540/... 而直接失败。
           #
-          # 注意：YAML 块标量里的 heredoc，脚本内容必须比 `python3 -` 缩进更深，
-          # 否则会被当成 shell 命令执行，导致本 step 失败、buildozer 根本没跑
-          # （踩过一次：表现为「构建日志里没有任何 buildozer 输出，bin/ 是空的」）。
-          python3 - <<'PY'
-            import re
-            p = 'buildozer.spec'
-            s = open(p, encoding='utf-8').read()
-            for key in ['android.sdk_path', 'android.ndk_path', 'java.home']:
-                s = re.sub(r'(?m)^\s*' + re.escape(key) + r'.*\n', '', s)
-            open(p, 'w', encoding='utf-8').write(s)
-            print('已清除本地路径行，使用容器内置 SDK/NDK')
-          PY
+          # 用 sed 而非 python3 heredoc：YAML 块标量会把 heredoc 内容的公共缩进
+          # 剥掉，Python 收到带前导空格的代码 -> IndentationError。
+          # （两种写法各踩一次：顶格写 YAML 会当 shell 命令；缩进写 Python 会
+          #   IndentationError。sed 完全绕开这个坑。）
+          sed -i '/^[[:space:]]*android\.sdk_path/d' buildozer.spec
+          sed -i '/^[[:space:]]*android\.ndk_path/d'  buildozer.spec
+          sed -i '/^[[:space:]]*java\.home/d'         buildozer.spec
           echo "--- spec 生效配置 ---"
           grep -E '^android\.(ndk|api|minapi|archs)' buildozer.spec || true
           # 硬断言：本机路径必须已清干净，否则 buildozer 会去找不存在的 C:/...
