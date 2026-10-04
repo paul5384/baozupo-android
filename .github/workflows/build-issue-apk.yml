@@ -96,6 +96,17 @@ jobs:
             exit 1
           fi
           echo "本机路径已清空（0 命中）"
+
+          # 用容器里 buildozer 自己的 Python 预检 spec（必须在 sed 之后跑）。
+          # 起因：android.allow_backup 写成 False，容器内 Python 3.14 的
+          # configparser.getboolean() 抛 ValueError，而错误发生在
+          # 「Package the application」之后，症状只是「bin/ 里没有 APK」，
+          # 不预检根本定位不到是哪个键。
+          # 逻辑放在 prespec.py（而不是内联 heredoc）：YAML 块标量会剥掉
+          # heredoc 内容的公共缩进，Python 收到带前导空格的代码就 IndentationError
+          # （顶格写则被当 shell 命令，这个坑连踩两次）。
+          python3 prespec.py buildozer.spec
+          echo "spec 预检通过"
           rm -rf .buildozer/android/platform/build .buildozer/android/platform/build-*
           set +o pipefail
           set +e

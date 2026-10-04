@@ -15,6 +15,8 @@ package.domain = org.baozupo
 source.dir = .
 source.include_exts = py,kv,png,jpg,jpeg,ttf,json,atlas,ico
 source.include_patterns = fonts/*,assets/*
+# CI 专用的 spec 自检脚本与测试文件，不必进包
+source.exclude_patterns = prespec.py,_test_*.py,shots/*,*.log
 
 version = 1.0
 
@@ -44,7 +46,12 @@ p4a.local_recipes = ./recipes
 android.permissions = INTERNET
 
 # 不允许备份，避免私钥 vault 被系统同步出去
-android.allow_backup = False
+# 写成 0/1 而不是 true/false：buildozer 用 configparser.getboolean() 读它，
+# 各版本对字符串布尔的宽容度不同（3.14 就因为 False 直接抛 ValueError），
+# 而 0/1 是所有版本都无条件接受的写法。
+# 症状极隐蔽：错误发生在「Package the application」之后、APK 产出之前，
+# 表现为「bin/ 里没有 APK」，不看完整 traceback 根本找不到根因。
+android.allow_backup = 0
 android.accept_sdk_license = True
 android.wakelock = False
 android.logcat_filters = *:S python:D
