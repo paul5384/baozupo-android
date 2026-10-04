@@ -1,0 +1,103 @@
+name: 打包发码器APK
+
+# 官方 kivy/buildozer 容器。发码器与主 App 共用同一套构建链路，
+# 只是 package.name 不同（bzqissue vs baozupo），两者可并存于同一台手机。
+on:
+  workflow_dispatch:
+  push:
+    branches: [ issue-apk ]
+    paths:
+      - 'issue/**'
+
+jobs:
+  build-issue-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    container:
+      image: kivy/buildozer:latest
+      options: --user root
+
+    defaults:
+      run:
+        working-directory: issue
+
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      # 与主 App 相同的 keystore 策略：Actions cache 持久化，
+      # 首次 keytool 生成，之后每次复用同一份证书。
+      - name: 恢复签名 keystore
+        uses: actions/cache@v4
+        with:
+          path: issue/.signing
+          key: baozupo-signing-keystore-v1
+
+      - name: 若无则生成 keystore
+        run: |
+          set -e
+          mkdir -p .signing
+          if [ ! -f .signing/app.keystore ]; then
+            echo "首次运行：生成 keystore"
+            keytool -genkeypair -v -keystore .signing/app.keystore -storetype PKCS12 \
+              -storepass baozupo2026 -keypass baozupo2026 -alias baozupo \
+              -keyalg RSA -keysize 2048 -validity 18250 \
+              -dname "CN=Baozupo Issue, OU=Rental, O=Baozupo, L=Guangzhou, ST=GD, C=CN"
+          fi
+          keytool -list -v -keystore .signing/app.keystore -storepass baozupo2026 \
+            -alias baozupo | grep -E 'SHA1:' || true
+
+      - name: 借用主 App 的中文字体（避免仓库里塞两份 13MB 字体）
+        run: |
+          set -e
+          mkdir -p fonts
+          if [ ! -f fonts/simhei.ttf ]; then
+            cp ../fonts/simhei.ttf fonts/simhei.ttf
+          fi
+          ls -l fonts/
+
+      - name: 缓存 buildozer 环境
+        uses: actions/cache@v4
+        with:
+          path: |
+            /github/home/.buildozer
+            /github/home/.gradle
+            /root/.buildozer
+            .buildozer
+          key: buildozer-issue-${{ hashFiles('issue/buildozer.spec') }}
+
+      - name: 定位 buildozer / p4a
+        run: |
+          set -e
+          bz=$(command -v buildozer || find / -name buildozer -type f 2>/dev/null | head -1)
+          echo "buildozer at: $bz"
+          "$bz" --version || true
+          echo "NDK dirs:"; ls -d /github/home/.buildozer/android/platform/android-ndk-* 2>/dev/null || true
+
+      - name: 清理 p4a 产物并打包
+        run: |
+          set -e
+          rm -rf .buildozer/android/platform/build .buildozer/android/platform/build-*
+          grep -E '^android\.(ndk|api|minapi|archs)' buildozer.spec || true
+          yes | buildozer -v android debug 2>&1 | tee build.log
+
+      - name: 定位并签名 APK
+        run: |
+          set -e
+          APK=$(find bin -name '*.apk' | head -1)
+          echo "APK=$APK"
+          test -n "$APK"
+          mkdir -p signed
+          "$ANDROID_HOME"/build-tools/*/apksigner sign \
+            --ks .signing/app.keystore --ks-pass pass:baozupo2026 \
+            --key-pass pass:baozupo2026 --ks-key-alias baozupo \
+            --out signed/$(basename "$APK") "$APK"
+          "$ANDROID_HOME"/build-tools/*/apksigner verify --print-certs \
+            signed/$(basename "$APK") | head -20 || true
+          ls -l signed/
+
+      - name: 上传 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bzq-issue-apk
+          path: issue/signed/*.apk
