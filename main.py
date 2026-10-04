@@ -689,6 +689,20 @@ class Store(object):
             "当月总收费": "%.0f元" % (paid_rent + elec + water),
         }
 
+    def data_months(self, n=12):
+        """可选月份：最近 n 个月 + 数据里出现过的所有月份（去重，倒序）。
+        只给最近 12 个月的话，「往年」那几个月的数据在按月视图里根本选不到。"""
+        ms = set(gen_months(n))
+        for p in self.data.get("payments", []):
+            d = str(p.get("date", ""))
+            if len(d) >= 7 and d[:4].isdigit() and d[5:7].isdigit():
+                ms.add(d[:7])
+        for u in self.data.get("utilities", []):
+            mo = str(u.get("month", ""))
+            if len(mo) >= 7 and mo[:4].isdigit() and mo[5:7].isdigit():
+                ms.add(mo[:7])
+        return sorted(ms, reverse=True)
+
     def data_years(self, n=6):
         """可选年份：数据里出现过的年份 + 最近 n 年（去重，倒序）"""
         years = set()
@@ -1243,8 +1257,8 @@ class BaozupoApp(App):
             y_spn.bind(text=self.on_year_change)
             bar.add_widget(y_spn)
         else:
-            months = gen_months(12)
-            m_spn = mk_spinner(months, self.stat_ym if self.stat_ym in months else months[-1])
+            months = self.store.data_months()      # 含数据里出现过的往月，不只是最近 12 个月
+            m_spn = mk_spinner(months, self.stat_ym if self.stat_ym in months else months[0])
             m_spn.bind(text=self.on_month_change)
             bar.add_widget(m_spn)
         btn_exp = Button(text="导出", size_hint_x=None, width=dp(58), font_size=sp(13),
