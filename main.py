@@ -23,6 +23,11 @@ import hashlib
 import traceback
 from datetime import datetime, timedelta
 
+# 授权体系（ECDSA 非对称签名，本 App 只含公钥）
+# 放在最前面 import：这两个模块不依赖 Kivy，授权逻辑要在任何 UI 之前就绪
+import ecdsa_p256
+import license_core as LIC
+
 # ==============================================================================
 # 【诊断引导块 A】—— 在任何 Kivy 代码之前建立日志 / 阶段记录 / 崩溃逃生通道
 # 目的：定位"显示启动图后闪退"。不依赖数据线，靠三条通道把信息送出来：
@@ -357,7 +362,7 @@ except Exception as _e:
 # 一、基础信息与主题色
 # ==============================================================================
 APP_NAME = "包租婆出租屋管家"
-VERSION = "2.1.4"
+VERSION = "2.1.5"
 AUTHOR = "Paul"
 CONTACT = "15880355384"
 
@@ -479,28 +484,20 @@ _diag_report("S4 数据目录就绪", "DATA_FILE=%s" % DATA_FILE)
 QR_PAY_IMG = os.path.join(BASE_DIR, "assets", "wx_pay.jpg")     # 微信收款码
 QR_CARD_IMG = os.path.join(BASE_DIR, "assets", "wx_card.jpg")   # 微信名片（加好友）
 
-# 【重要】激活码密钥：必须与《授权码生成器.html》里的 SECRET 完全一致。
-# 改动这一行会让之前发出去的所有激活码失效，非必要不要改。
-LICENSE_SECRET = "BZP-RENT-2026-PAUL"
+# 【重要】本 App 只持有公钥，私钥只存在于作者的《发码器》APK 里，永不进入任何安装包。
+# 授权码 = 作者用私钥对 "BZP2|<设备码>" 做 ECDSA P-256 签名得到的 104 位码。
+# 因此即使有人解包本 APK 拿到全部文件，也伪造不出任何一台设备的激活码。
+# 公钥若需更换（换密钥对），已发出去的旧码会失效，需重发。
 LICENSE_FILE = os.path.join(app_data_dir(), "baozupo_license.json")
 
 PRICE_TEXT = "29.9"           # 升级页显示的价格（纯文案，收款码本身不含金额）
 FREE_REMINDER_ROWS = 3        # 免费版在首页能看到的「到期提醒」条数
-
-# 激活码用字符集：去掉 0/O/1/I/L 等肉眼易混的字符，方便用户手输 / 微信转述
-_LIC_CHARS = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
-
-
-def _lic_encode(seed_text, n=16):
-    """由 seed 派生 n 位码（SHA-256 → 字符集）。同 seed 必得同结果"""
-    h = hashlib.sha256(seed_text.encode("utf-8")).hexdigest().upper()
-    return "".join(_LIC_CHARS[int(h[i:i + 2], 16) % len(_LIC_CHARS)]
-                   for i in range(0, n * 2, 2))
+LIC_CHARS = LIC.CHARS         # 设备码字符集（与编解码共用一份，避免两边不一致）
 
 
 def lic_device_new():
     """新建设备码（8 位，显示成 XXXX-XXXX）"""
-    return "".join(random.choice(_LIC_CHARS) for _ in range(8))
+    return "".join(random.choice(LIC_CHARS) for _ in range(8))
 
 
 def lic_fmt(group):
@@ -508,31 +505,9 @@ def lic_fmt(group):
     return "-".join(group[i:i + 4] for i in range(0, len(group), 4))
 
 
-def lic_code_for_device(device):
-    """设备专属激活码：BZP-XXXX-XXXX-XXXX-XXXX"""
-    return "BZP-" + lic_fmt(_lic_encode(LICENSE_SECRET + "|DEV|" + (device or "").upper()))
-
-
-def lic_code_universal():
-    """通用激活码：换机 / 重装也能用（作者可选发这种，省事但可能被转手）"""
-    return "BZP-" + lic_fmt(_lic_encode(LICENSE_SECRET + "|ANY|"))
-
-
-def lic_normalize(s):
-    """把用户输入揉成纯大写字母数字：忽略 BZP 前缀、横线、空格、大小写"""
-    s = re.sub(r"[^0-9A-Za-z]", "", s or "").upper()
-    if s.startswith("BZP"):
-        s = s[3:]
-    return s
-
-
 def lic_check(inp, device):
-    """校验输入码对本机是否有效"""
-    key = lic_normalize(inp)
-    if len(key) < 12:
-        return False
-    return key in {lic_normalize(lic_code_for_device(device)),
-                   lic_normalize(lic_code_universal())}
+    """校验激活码对本机是否有效。返回 (是否通过, 失败原因)"""
+    return LIC.check_code(inp, device, ecdsa_p256.verify)
 
 
 # ==============================================================================
@@ -704,7 +679,8 @@ class Store(object):
 
     def try_activate(self, code):
         """校验激活码并落盘。成功 True，失败 False（不改动任何状态）"""
-        if not lic_check(code, self.device_id):
+        ok, _why = lic_check(code, self.device_id)
+        if not ok:
             return False
         self.lic["activated"] = True
         self.lic["code"] = (code or "").strip().upper()
@@ -712,6 +688,11 @@ class Store(object):
         self.lic["device"] = self.device_id
         self.lic_save()
         return True
+
+    def activate_reason(self, code):
+        """给界面用的失败原因（成功时返回空串）"""
+        ok, why = lic_check(code, self.device_id)
+        return "" if ok else why
 
     # ---------- 查询 ----------
     def houses(self):
@@ -2497,8 +2478,9 @@ class BaozupoApp(App):
                 "  · 房间详情导出为 TXT\n"
                 "  · 首页到期提醒显示完整明细\n\n"
                 "【本机设备码】 %s\n"
-                "付款后点「联系作者」加我微信，把设备码发我，\n"
-                "我回你激活码，粘到下面的输入框里点「激活」即可。"
+                "① 点下面的「复制授权申请」，整段发到作者微信；\n"
+                "② 作者回你一串激活码，粘到最下面的输入框；\n"
+                "③ 点「激活」即永久解锁。"
                 % (PRICE_TEXT, dev))
         lab = Label(text=tips, size_hint_y=None, font_size=sp(12.5), color=POPUP_TEXT_C,
                     halign="left", valign="top")
@@ -2506,11 +2488,16 @@ class BaozupoApp(App):
         lab.bind(texture_size=lambda w, *_: setattr(w, "height", w.texture_size[1]))
         inner.add_widget(lab)
 
-        # 设备码本身已写在上面说明里，这里只给一个复制按钮
-        b_cp = Button(text="复制本机设备码（发给作者）", size_hint_y=None, height=dp(44),
-                      font_size=sp(14), background_color=C_INFO, color=(1, 1, 1, 1))
-        b_cp.bind(on_release=lambda *_: self.copy_text(dev, "设备码已复制：%s" % dev))
-        inner.add_widget(b_cp)
+        # 一键复制整段授权申请：客户只要粘贴发微信，不用自己整理设备码
+        def _copy_request(*_):
+            txt = LIC.make_request(self.store.device_id or "")
+            self.copy_text(txt, "授权申请已复制，粘贴发给作者即可")
+
+        b_req = Button(text="复制授权申请（整段发给作者）", size_hint_y=None, height=dp(44),
+                       font_size=sp(14), background_color=(0.36, 0.62, 0.36, 1),
+                       color=(1, 1, 1, 1))
+        b_req.bind(on_release=_copy_request)
+        inner.add_widget(b_req)
 
         sv.add_widget(inner)
         box.add_widget(sv)
@@ -2519,7 +2506,7 @@ class BaozupoApp(App):
         # 否则说明文字一长，输入框就被滚出可视区，用户根本找不到该往哪填。
         ti = None
         if not paid:
-            ti = mk_input("在此粘贴激活码（BZP-XXXX-XXXX-XXXX-XXXX）", "")
+            ti = mk_input("粘贴激活码（BZP- 开头，共 8 段）", "")
             ti.size_hint_y = None
             ti.height = dp(46)
             box.add_widget(ti)
@@ -2570,7 +2557,8 @@ class BaozupoApp(App):
                     "导出统计报表、导出房间详情、查看全部到期提醒。\n\n"
                     "本机设备码：%s" % dev), 0.3)
             else:
-                self.toast("激活码无效（请核对是否与本机设备码匹配）")
+                why = self.store.activate_reason(txt)
+                self.toast("激活失败：%s" % why)
 
         b_con.bind(on_release=do_contact)
         b_act.bind(on_release=do_activate)
