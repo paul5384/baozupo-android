@@ -62,7 +62,9 @@ jobs:
             /github/home/.gradle
             /root/.buildozer
             .buildozer
-          key: buildozer-issue-${{ hashFiles('issue/buildozer.spec') }}
+          # v2：上一轮因 workflow 缩进坏掉、buildozer 没真正启动，
+          # 缓存里是半成品环境，换 key 强制重跑
+          key: buildozer-issue-v2-${{ hashFiles('issue/buildozer.spec') }}
 
       - name: 定位 buildozer / p4a
         run: |
@@ -77,22 +79,47 @@ jobs:
           set -e
           # 清除本机 Windows 路径行，使用容器内置的 SDK/NDK/JDK。
           # 少了这一步，buildozer 会去找 C:/Users/L540/... 而直接失败。
+          #
+          # 注意：YAML 块标量里的 heredoc，脚本内容必须比 `python3 -` 缩进更深，
+          # 否则会被当成 shell 命令执行，导致本 step 失败、buildozer 根本没跑
+          # （踩过一次：表现为「构建日志里没有任何 buildozer 输出，bin/ 是空的」）。
           python3 - <<'PY'
-          import re
-          p='buildozer.spec'
-          s=open(p,encoding='utf-8').read()
-          for key in ['android.sdk_path','android.ndk_path','java.home']:
-              s=re.sub(r'(?m)^\s*'+re.escape(key)+r'.*\n','',s)
-          open(p,'w',encoding='utf-8').write(s)
-          print('已清除本地路径行，使用容器内置 SDK/NDK')
+            import re
+            p = 'buildozer.spec'
+            s = open(p, encoding='utf-8').read()
+            for key in ['android.sdk_path', 'android.ndk_path', 'java.home']:
+                s = re.sub(r'(?m)^\s*' + re.escape(key) + r'.*\n', '', s)
+            open(p, 'w', encoding='utf-8').write(s)
+            print('已清除本地路径行，使用容器内置 SDK/NDK')
           PY
-          rm -rf .buildozer/android/platform/build .buildozer/android/platform/build-*
+          echo "--- spec 生效配置 ---"
           grep -E '^android\.(ndk|api|minapi|archs)' buildozer.spec || true
+          # 硬断言：本机路径必须已清干净，否则 buildozer 会去找不存在的 C:/...
+          if grep -q 'L540' buildozer.spec; then
+            echo "::error::buildozer.spec 仍含本机路径，buildozer 必然失败"
+            grep -n 'L540' buildozer.spec
+            exit 1
+          fi
+          echo "本机路径已清空（0 命中）"
+          rm -rf .buildozer/android/platform/build .buildozer/android/platform/build-*
           set +o pipefail
           set +e
           yes | buildozer -v android debug 2>&1 | tee build.log
           echo "--- bin 目录内容 ---"
           ls -l bin/ || true
+          # 硬断言：buildozer 确实跑起来了（build.log 应该有大量输出）
+          LINES=$(wc -l < build.log 2>/dev/null || echo 0)
+          echo "build.log 行数 = $LINES"
+          if [ "$LINES" -lt 50 ]; then
+            echo "::error::buildozer 输出只有 $LINES 行，说明没真正启动"
+            tail -30 build.log || true
+            exit 1
+          fi
+          if ! ls bin/*.apk >/dev/null 2>&1; then
+            echo "::error::bin/ 里没有 APK"
+            tail -40 build.log || true
+            exit 1
+          fi
 
       - name: zipalign + 签名（否则手机报「未签名，无法安装」）
         run: |
