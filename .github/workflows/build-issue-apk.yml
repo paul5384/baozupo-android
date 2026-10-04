@@ -26,7 +26,7 @@ jobs:
         uses: actions/checkout@v4
 
       # 与主 App 相同的 keystore 策略：Actions cache 持久化，
-      # 首次 keytool 生成，之后每次复用同一份证书。
+      # 首次 keytool 生成，之后每次复用同一份证书（两边同 key，签名一致）。
       - name: 恢复签名 keystore
         uses: actions/cache@v4
         with:
@@ -77,27 +77,59 @@ jobs:
       - name: 清理 p4a 产物并打包
         run: |
           set -e
+          # 清除本机 Windows 路径行，使用容器内置的 SDK/NDK/JDK。
+          # 少了这一步，buildozer 会去找 C:/Users/L540/... 而直接失败。
+          python3 - <<'PY'
+          import re
+          p='buildozer.spec'
+          s=open(p,encoding='utf-8').read()
+          for key in ['android.sdk_path','android.ndk_path','java.home']:
+              s=re.sub(r'(?m)^\s*'+re.escape(key)+r'.*\n','',s)
+          open(p,'w',encoding='utf-8').write(s)
+          print('已清除本地路径行，使用容器内置 SDK/NDK')
+          PY
           rm -rf .buildozer/android/platform/build .buildozer/android/platform/build-*
           grep -E '^android\.(ndk|api|minapi|archs)' buildozer.spec || true
+          set +o pipefail
+          set +e
           yes | buildozer -v android debug 2>&1 | tee build.log
+          echo "--- bin 目录内容 ---"
+          ls -l bin/ || true
 
-      - name: 定位并签名 APK
+      - name: zipalign + 签名（否则手机报「未签名，无法安装」）
         run: |
-          set -e
-          APK=$(find bin -name '*.apk' | head -1)
-          echo "APK=$APK"
-          test -n "$APK"
-          mkdir -p signed
-          "$ANDROID_HOME"/build-tools/*/apksigner sign \
-            --ks .signing/app.keystore --ks-pass pass:baozupo2026 \
-            --key-pass pass:baozupo2026 --ks-key-alias baozupo \
-            --out signed/$(basename "$APK") "$APK"
-          "$ANDROID_HOME"/build-tools/*/apksigner verify --print-certs \
-            signed/$(basename "$APK") | head -20 || true
-          ls -l signed/
+          set +e
+          ZIPALIGN=$(find /github/home /root /opt /usr/local -maxdepth 8 -type f -name zipalign \
+                     -path '*/build-tools/*' 2>/dev/null | sort | tail -1)
+          echo "zipalign -> [$ZIPALIGN]"
+          if [ -z "$ZIPALIGN" ]; then
+            echo "::warning::找不到 zipalign/apksigner，本轮 APK 仍未签名"
+          else
+            BT=$(dirname "$ZIPALIGN")
+            for a in bin/*.apk; do
+              b=$(basename "$a" .apk)
+              "$BT/zipalign" -p -f 4 "$a" "${b}_al.apk"
+              if [ -f "$BT/apksigner" ]; then
+                "$BT/apksigner" sign --ks .signing/app.keystore --ks-pass pass:baozupo2026 \
+                  --key-pass pass:baozupo2026 --ks-key-alias baozupo --out "${b}_sg.apk" "${b}_al.apk"
+                "$BT/apksigner" verify --print-certs "${b}_sg.apk"
+              else
+                java -cp "$BT/lib/apksigner.jar" com.android.apksigner.ApkSignerTool sign \
+                  --ks .signing/app.keystore --ks-pass pass:baozupo2026 \
+                  --key-pass pass:baozupo2026 --ks-key-alias baozupo --out "${b}_sg.apk" "${b}_al.apk"
+                java -cp "$BT/lib/apksigner.jar" com.android.apksigner.ApkSignerTool verify --print-certs "${b}_sg.apk"
+              fi
+              mv -f "${b}_sg.apk" "$a"
+              rm -f "${b}_al.apk"
+            done
+            echo "--- 签名后 ---"
+            ls -lh bin/
+          fi
 
-      - name: 上传 artifact
+      - name: 上传 APK
         uses: actions/upload-artifact@v4
         with:
           name: bzq-issue-apk
-          path: issue/signed/*.apk
+          path: issue/bin/*.apk
+          if-no-files-found: error
+          retention-days: 30
