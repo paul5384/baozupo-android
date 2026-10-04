@@ -153,3 +153,17 @@ jobs:
           path: issue/bin/*.apk
           if-no-files-found: error
           retention-days: 30
+
+      # 失败时把 build.log 也传上来：run 日志动辄 1.5MB 且大半是 CPython
+      # 编译 stdlib 的正常噪音，真正的原因藏在最后几行。直接下这个文件快得多。
+      - name: 上传构建日志（便于排查）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bzq-issue-buildlog
+          path: |
+            issue/build.log
+            issue/buildozer.spec
+            issue/.buildozer/android/platform/build-*/dists/*/*.log
+          if-no-files-found: ignore
+          retention-days: 7

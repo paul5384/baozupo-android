@@ -40,10 +40,11 @@ java.home = C:/Users/L540/android-build/jdk
 android.archs = arm64-v8a
 p4a.local_recipes = ./recipes
 
-# 发码器不读写 sdcard，只要剪贴板权限；INTERNET 也不需要，去掉最小化权限面
+# 发码器不读写 sdcard，只要剪贴板权限
 android.permissions = INTERNET
 
-android.allow_backup = False          # 不允许备份，避免私钥 vault 被同步出去
+# 不允许备份，避免私钥 vault 被系统同步出去
+android.allow_backup = False
 android.accept_sdk_license = True
 android.wakelock = False
 android.logcat_filters = *:S python:D
