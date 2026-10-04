@@ -2562,11 +2562,13 @@ class BaozupoApp(App):
                 p.dismiss()
                 self.refresh_mine()
                 self.build_home()
-                info_popup("激活成功",
-                           "付费版已解锁，感谢支持！\n\n"
-                           "现在可以：导出 / 导入数据备份、导出租客名单、\n"
-                           "导出统计报表、导出房间详情、查看全部到期提醒。\n\n"
-                           "本机设备码：%s" % dev)
+                # 等升级弹窗收完动画再弹成功提示，两个 Popup 叠在一起会闪一下
+                Clock.schedule_once(lambda *_: info_popup(
+                    "激活成功",
+                    "付费版已解锁，感谢支持！\n\n"
+                    "现在可以：导出 / 导入数据备份、导出租客名单、\n"
+                    "导出统计报表、导出房间详情、查看全部到期提醒。\n\n"
+                    "本机设备码：%s" % dev), 0.3)
             else:
                 self.toast("激活码无效（请核对是否与本机设备码匹配）")
 
