@@ -354,7 +354,7 @@ except Exception as _e:
 # 一、基础信息与主题色
 # ==============================================================================
 APP_NAME = "包租婆出租屋管家"
-VERSION = "2.1.2"
+VERSION = "2.1.3"
 AUTHOR = "Paul"
 CONTACT = "15880355384"
 
@@ -640,7 +640,8 @@ class Store(object):
         return False
 
     # ---------- 统计 ----------
-    def stats(self, ym):
+    def _snapshot_stats(self):
+        """「当前快照」类指标：房间数 / 在租 / 押金 / 月租合计 —— 与统计区间无关"""
         houses = self.data["houses"]
         total = len(houses)
         rented = len([h for h in houses if h.get("status") == "已租"])
@@ -648,13 +649,24 @@ class Store(object):
                       if not t.get("is_leave", False) and is_number(t.get("deposit")))
         rent_sum = sum(float(h["price"]) for h in houses
                        if h.get("status") == "已租" and is_number(h.get("price")))
-        paid_rent = sum(float(p.get("money", 0)) for p in self.data["payments"]
-                        if str(p.get("date", "")).startswith(ym) and is_number(p.get("money")))
+        return total, rented, deposit, rent_sum
+
+    def _money_of(self, prefix):
+        """按前缀累加收租与水电：prefix 可以是 '2026-03'（月）也可以是 '2026'（年）"""
+        paid = sum(float(p.get("money", 0)) for p in self.data["payments"]
+                   if str(p.get("date", "")).startswith(prefix) and is_number(p.get("money")))
         elec = water = 0.0
         for u in self.data["utilities"]:
-            if str(u.get("month", "")) == ym and is_number(u.get("elec")) and is_number(u.get("water")):
+            if str(u.get("month", "")).startswith(prefix) \
+                    and is_number(u.get("elec")) and is_number(u.get("water")):
                 elec += float(u["elec"])
                 water += float(u["water"])
+        return paid, elec, water
+
+    def stats(self, ym):
+        """按月统计（原有行为不变）"""
+        total, rented, deposit, rent_sum = self._snapshot_stats()
+        paid_rent, elec, water = self._money_of(str(ym))
         return {
             "总房间": str(total), "已租": str(rented), "空闲": str(total - rented),
             "已收押金": "%.0f元" % deposit, "月租合计": "%.0f元" % rent_sum,
@@ -662,6 +674,52 @@ class Store(object):
             "已收电费": "%.0f元" % elec, "已收水费": "%.0f元" % water,
             "当月总收费": "%.0f元" % (paid_rent + elec + water),
         }
+
+    def stats_year(self, year):
+        """按年统计：房间/押金是快照，收租与水电按整年累加；
+        年租合计 = 在租房月租 × 12，未收 = 年应收 - 当年已收"""
+        total, rented, deposit, rent_sum = self._snapshot_stats()
+        paid_rent, elec, water = self._money_of(str(year))
+        year_rent = rent_sum * 12
+        return {
+            "总房间": str(total), "已租": str(rented), "空闲": str(total - rented),
+            "已收押金": "%.0f元" % deposit, "月租合计": "%.0f元" % year_rent,
+            "已收租金": "%.0f元" % paid_rent, "未收租金": "%.0f元" % max(0.0, year_rent - paid_rent),
+            "已收电费": "%.0f元" % elec, "已收水费": "%.0f元" % water,
+            "当月总收费": "%.0f元" % (paid_rent + elec + water),
+        }
+
+    def data_years(self, n=6):
+        """可选年份：数据里出现过的年份 + 最近 n 年（去重，倒序）"""
+        years = set()
+        for p in self.data.get("payments", []):
+            d = str(p.get("date", ""))
+            if len(d) >= 4 and d[:4].isdigit():
+                years.add(d[:4])
+        for u in self.data.get("utilities", []):
+            mo = str(u.get("month", ""))
+            if len(mo) >= 4 and mo[:4].isdigit():
+                years.add(mo[:4])
+        now_y = datetime.now().year
+        for i in range(n):
+            years.add(str(now_y - i))
+        return sorted(years, reverse=True)
+
+    def range_records(self, prefix):
+        """统计区间内的明细流水：收租 + 水电，用于导出"""
+        pays = [p for p in self.data.get("payments", [])
+                if str(p.get("date", "")).startswith(prefix)]
+        utils = [u for u in self.data.get("utilities", [])
+                 if str(u.get("month", "")).startswith(prefix)]
+        try:
+            pays.sort(key=lambda x: (str(x.get("date", "")), room_key({"room": x.get("room", "")})))
+        except Exception:
+            pass
+        try:
+            utils.sort(key=lambda x: (str(x.get("month", "")), room_key({"room": x.get("room", "")})))
+        except Exception:
+            pass
+        return pays, utils
 
     def reminders(self):
         """返回 [(房间, 姓名, 到期日, 剩余天数)]，包含已过期"""
@@ -1033,6 +1091,9 @@ class BaozupoApp(App):
     version = StringProperty(VERSION)
     login_user = StringProperty("")
     stat_ym = StringProperty(datetime.now().strftime("%Y-%m"))
+    # 「按月 / 按年」两种统计口径：按年时用它选年份，可查往年
+    stat_mode = StringProperty("按月")
+    stat_year = StringProperty(str(datetime.now().year))
     filter_status = StringProperty("全部")
     search_key = StringProperty("")
 
@@ -1165,25 +1226,61 @@ class BaozupoApp(App):
         body = self.sm.get_screen("home").ids.body
         body.clear_widgets()
 
-        # 月份切换
-        bar = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8), padding=[dp(2), dp(2)])
-        lab = Label(text="统计月份", size_hint_x=None, width=dp(78), font_size=sp(13), color=C_MUTED)
+        # 统计区间切换：按月（含往月 12 个月） / 按年（含往年）
+        bar = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(6), padding=[dp(2), dp(2)])
+        lab = Label(text="统计区间", size_hint_x=None, width=dp(64), font_size=sp(13), color=C_MUTED)
         bar.add_widget(lab)
-        months = gen_months(12)
-        spn = mk_spinner(months, self.stat_ym if self.stat_ym in months else months[-1])
-        spn.bind(text=self.on_month_change)
-        bar.add_widget(spn)
+        mode_spn = mk_spinner(["按月", "按年"], self.stat_mode)
+        mode_spn.size_hint_x = None
+        mode_spn.width = dp(76)
+        mode_spn.bind(text=self.on_stat_mode_change)
+        bar.add_widget(mode_spn)
+        if self.stat_mode == "按年":
+            years = self.store.data_years()
+            if self.stat_year not in years:
+                years = years + [self.stat_year]
+            y_spn = mk_spinner(years, self.stat_year)
+            y_spn.bind(text=self.on_year_change)
+            bar.add_widget(y_spn)
+        else:
+            months = gen_months(12)
+            m_spn = mk_spinner(months, self.stat_ym if self.stat_ym in months else months[-1])
+            m_spn.bind(text=self.on_month_change)
+            bar.add_widget(m_spn)
+        btn_exp = Button(text="导出", size_hint_x=None, width=dp(58), font_size=sp(13),
+                         background_color=C_INFO, color=(1, 1, 1, 1))
+        btn_exp.bind(on_release=lambda *_: self.export_stats())
+        bar.add_widget(btn_exp)
         body.add_widget(bar)
 
         # 统计卡片（一行 5 个 × 2 行）
         grid = GridLayout(cols=5, spacing=dp(6), size_hint_y=None, padding=[0, dp(2)])
         grid.bind(minimum_height=grid.setter("height"))
-        data = self.store.stats(self.stat_ym)
-        for i, key in enumerate(["总房间", "已租", "空闲", "已收押金", "月租合计",
-                                 "已收租金", "未收租金", "已收电费", "已收水费", "当月总收费"]):
-            grid.add_widget(StatCard(label=key, value=data.get(key, "0"),
+        # (显示标签, 数据键) —— 注意按年时标签要改叫「年租合计 / 当年总收费」，
+        # 但数据键仍是 stats_year 返回的「月租合计 / 当月总收费」，两者必须映射对，
+        # 否则卡片会取不到值而显示 0（曾因此把 25200 显示成 0）。
+        if self.stat_mode == "按年":
+            data = self.store.stats_year(self.stat_year)
+            cards = [("总房间", "总房间"), ("已租", "已租"), ("空闲", "空闲"),
+                     ("已收押金", "已收押金"), ("年租合计", "月租合计"),
+                     ("已收租金", "已收租金"), ("未收租金", "未收租金"),
+                     ("已收电费", "已收电费"), ("已收水费", "已收水费"),
+                     ("当年总收费", "当月总收费")]
+            title = "实时统计（%s 年）" % self.stat_year
+        else:
+            data = self.store.stats(self.stat_ym)
+            cards = [(k, k) for k in ["总房间", "已租", "空闲", "已收押金", "月租合计",
+                                      "已收租金", "未收租金", "已收电费", "已收水费", "当月总收费"]]
+            title = "实时统计（%s）" % self.stat_ym
+        for i, (lab, dk) in enumerate(cards):
+            grid.add_widget(StatCard(label=lab, value=data.get(dk, "0"),
                                      bg=CARD_COLORS[i % len(CARD_COLORS)], height=dp(58)))
         body.add_widget(grid)
+        # 标题栏同步显示当前统计区间（KV 里是写死的「实时统计」）
+        try:
+            self.sm.get_screen("home").ids.title.text = title
+        except Exception:
+            pass
 
         # 到期提醒
         rem = self.store.reminders()
@@ -1198,14 +1295,21 @@ class BaozupoApp(App):
                 bg = (0.99, 0.92, 0.92, 1) if left < 0 else (0.99, 0.97, 0.89, 1)
                 body.add_widget(self._row_card(txt, bg))
 
-        # 快捷操作
+        # 快捷操作（含全局搜索）
         body.add_widget(self._section("快捷操作", ""))
-        quick = GridLayout(cols=2, spacing=dp(8), size_hint_y=None, height=dp(112))
-        for text, cb in [("＋ 添加新房", lambda: self.open_house_form("add")),
-                         ("房屋租金一览", lambda: self.go("houses")),
-                         ("租客列表", lambda: self.go("tenants")),
-                         ("导出 / 导入备份", self.open_backup_menu)]:
-            b = Button(text=text, font_size=sp(14), background_color=C_ACCENT, color=(1, 1, 1, 1))
+        actions = [("搜索 房间 / 租客", self.open_global_search),
+                   ("＋ 添加新房", lambda: self.open_house_form("add")),
+                   ("房屋租金一览", lambda: self.go("houses")),
+                   ("租客列表", lambda: self.go("tenants")),
+                   ("导出 / 导入备份", self.open_backup_menu),
+                   ("导出当前统计", self.export_stats)]
+        rows = (len(actions) + 1) // 2
+        quick = GridLayout(cols=2, spacing=dp(8), size_hint_y=None,
+                           height=rows * dp(56) + (rows - 1) * dp(8))
+        for text, cb in actions:
+            b = Button(text=text, font_size=sp(14),
+                       background_color=C_INFO if text.startswith("搜索") else C_ACCENT,
+                       color=(1, 1, 1, 1))
             b.bind(on_release=lambda inst, f=cb: f())
             quick.add_widget(b)
         body.add_widget(quick)
@@ -1217,6 +1321,224 @@ class BaozupoApp(App):
             return
         self.stat_ym = text
         self.build_home()
+
+    def on_stat_mode_change(self, spinner, text):
+        """按月 <-> 按年：切换后重画首页（下拉框内容变了，必须重建）"""
+        if not text or text == self.stat_mode:
+            return
+        self.stat_mode = text
+        self.build_home()
+
+    def on_year_change(self, spinner, text):
+        if not text or text == self.stat_year:
+            return
+        self.stat_year = text
+        self.build_home()
+
+    # ---------------------------------------------------------- 搜索
+    def house_haystack(self, h):
+        """一套房的可搜索文本：房间号 / 地址 / 状态 / 面积 / 租金 / 配套 / 当前租客"""
+        room = str(h.get("room", ""))
+        t = self.store.current_tenant(room)
+        return " ".join([room, str(h.get("address", "")), str(h.get("status", "")),
+                         str(h.get("area", "")), str(h.get("price", "")),
+                         str(h.get("kitchen", "")), str(h.get("toilet", "")),
+                         str(h.get("balcony", "")),
+                         (t or {}).get("name", ""), (t or {}).get("tel", "")]).lower()
+
+    def match_tokens(self, hay, key):
+        """多关键词 AND：空格分隔，全部命中才算匹配（如「张三 138」）"""
+        key = (key or "").strip().lower()
+        if not key:
+            return True
+        return all(tok in hay for tok in key.split())
+
+    def _search_row(self, text, sub, on_hit, bg=(1, 1, 1, 1)):
+        """搜索结果行：主标题 + 副标题，整行可点。
+
+        注意：不要在 Button 里嵌 BoxLayout 装两个 Label —— Button 本身继承自 Label，
+        它会把子控件按自己的「文字区」摆放，实测两行文字会被挤到右边、甚至整行空白。
+        直接给 Button 一个多行 text，配 halign/valign + text_size 即可。
+        """
+        b = Button(text="%s\n%s" % (text, sub), size_hint_y=None, height=dp(58),
+                   font_size=sp(13), background_normal="", background_color=bg,
+                   color=C_TEXT, halign="left", valign="middle")
+        b.bind(size=lambda w, *_: setattr(w, "text_size", (w.width - dp(16), w.height)))
+        b.bind(on_release=on_hit)
+        return b
+
+    def open_global_search(self, *a):
+        """首页快捷操作里的搜索：一次搜「房屋」和「租客」，点结果直接进详情"""
+        self.store.load()
+        p = Popup(title="搜索", title_size=sp(16), size_hint=(0.94, 0.86), auto_dismiss=True)
+        root = BoxLayout(orientation="vertical", spacing=dp(6),
+                         padding=[dp(8), dp(8), dp(8), dp(8)])
+        ti = mk_input("房间号 / 地址 / 租客姓名 / 电话", "")
+        ti.height = dp(46)
+        root.add_widget(ti)
+
+        res = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(4))
+        res.bind(minimum_height=res.setter("height"))
+        sv = ScrollView(do_scroll_x=False)
+        sv.add_widget(res)
+        root.add_widget(sv)
+
+        bar = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
+        b_house = Button(text="在房屋页查看", font_size=sp(14), background_color=C_ACCENT,
+                         color=(1, 1, 1, 1))
+        b_close = Button(text="关闭", font_size=sp(14), background_color=BTN_NEUTRAL_C,
+                         color=(1, 1, 1, 1))
+        bar.add_widget(b_house)
+        bar.add_widget(b_close)
+        root.add_widget(bar)
+
+        def jump_houses(*_):
+            p.dismiss()
+            self.goto_houses_with(ti.text or "")
+
+        def render(*_):
+            key = (ti.text or "").strip()
+            res.clear_widgets()
+            if not key:
+                tip = Label(text="输入关键词自动搜索。\n支持空格分隔多个词，如「张三 138」。",
+                            font_size=sp(12), color=C_MUTED, halign="left", valign="top",
+                            size_hint_y=None, height=dp(50))
+                tip.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
+                res.add_widget(tip)
+                return
+            hits_h, hits_t = [], []
+            for h in sorted(self.store.houses(), key=room_key):
+                if self.match_tokens(self.house_haystack(h), key):
+                    hits_h.append(h)
+            for t in self.store.data.get("tenants", []):
+                hay = " ".join([str(t.get("name", "")), str(t.get("tel", "")),
+                                str(t.get("room", "")), str(t.get("rent_type", ""))]).lower()
+                if self.match_tokens(hay, key):
+                    hits_t.append(t)
+            if not hits_h and not hits_t:
+                none = Label(text="没有找到匹配的结果", font_size=sp(13), color=C_MUTED,
+                             size_hint_y=None, height=dp(40))
+                res.add_widget(none)
+                return
+
+            head = Label(text="房屋 %d 套" % len(hits_h), font_size=sp(12), color=C_PRIMARY,
+                         halign="left", size_hint_y=None, height=dp(24))
+            head.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
+            res.add_widget(head)
+            for h in hits_h[:30]:
+                room = str(h.get("room", ""))
+                t = self.store.current_tenant(room)
+                sub = "%s · %s元/月 · %s" % (
+                    h.get("address", ""), h.get("price", ""),
+                    ("租客 %s" % t.get("name", "")) if t else "空闲")
+                res.add_widget(self._search_row(
+                    "房间 %s  %s" % (room, h.get("status", "")), sub,
+                    lambda inst, r=room: (p.dismiss(), self.open_detail(r))))
+
+            head2 = Label(text="租客 %d 人" % len(hits_t), font_size=sp(12), color=C_PRIMARY,
+                          halign="left", size_hint_y=None, height=dp(24))
+            head2.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
+            res.add_widget(head2)
+            for t in hits_t[:30]:
+                room = str(t.get("room", ""))
+                sub = "房间 %s · %s · 入住 %s" % (room, t.get("rent_type", ""), t.get("in_date", ""))
+                res.add_widget(self._search_row(
+                    "%s  %s" % (t.get("name", ""), t.get("tel", "")), sub,
+                    lambda inst, r=room: (p.dismiss(), self.open_detail(r)),
+                    bg=(0.97, 0.98, 0.97, 1)))
+
+        ti.bind(text=lambda *_: render())
+        b_close.bind(on_release=lambda *_: p.dismiss())
+        b_house.bind(on_release=jump_houses)
+        render()
+        p.content = root
+        p.open()
+
+    def goto_houses_with(self, key):
+        """带着关键词跳到房屋页（先把词写进输入框，再刷新，顺序不能反）"""
+        self.search_key = key or ""
+        try:
+            ti = self.sm.get_screen("houses").ids.search
+            if ti.text != self.search_key:
+                ti.text = self.search_key
+        except Exception:
+            pass
+        self.go("houses")
+        self.refresh_houses()
+
+    def on_search_change(self, text):
+        """房屋页输入框变化即过滤（原来只有按回车才触发，用户以为搜索没反应）"""
+        self.search_key = text or ""
+        self.refresh_houses()
+
+    def search_from_input(self, *a):
+        """「搜索」按键：显式从输入框取值再过滤，不依赖 kv 的 on_text 绑定"""
+        try:
+            self.search_key = self.sm.get_screen("houses").ids.search.text or ""
+        except Exception:
+            pass
+        self.refresh_houses()
+
+    def clear_search(self, *a):
+        self.goto_houses_with("")
+
+    # ---------------------------------------------------------- 统计导出
+    def stat_range_label(self):
+        return ("%s 年" % self.stat_year) if self.stat_mode == "按年" else self.stat_ym
+
+    def stat_range_prefix(self):
+        return str(self.stat_year) if self.stat_mode == "按年" else str(self.stat_ym)
+
+    def export_stats(self, *a):
+        """导出当前统计区间的汇总 + 明细流水为 CSV（Excel 直接可开）"""
+        self.store.load()
+        import csv as _csv
+        prefix = self.stat_range_prefix()
+        label = self.stat_range_label()
+        data = (self.store.stats_year(self.stat_year) if self.stat_mode == "按年"
+                else self.store.stats(self.stat_ym))
+        # 同 build_home：标签与数据键要一一对应（按年时「年租合计」取「月租合计」）。
+        # 这里刻意不写嵌套三元——括号一多就容易漏，分开赋值最稳。
+        base_keys = ["总房间", "已租", "空闲", "已收押金", "月租合计",
+                     "已收租金", "未收租金", "已收电费", "已收水费", "当月总收费"]
+        if self.stat_mode == "按年":
+            pairs = list(zip(["总房间", "已租", "空闲", "已收押金", "年租合计",
+                              "已收租金", "未收租金", "已收电费", "已收水费", "当年总收费"],
+                             base_keys))
+        else:
+            pairs = [(k, k) for k in base_keys]
+        pays, utils = self.store.range_records(prefix)
+
+        buf = io.StringIO()
+        w = _csv.writer(buf)
+        w.writerow(["统计区间", label])
+        w.writerow([])
+        w.writerow(["指标", "数值"])
+        for lab, dk in pairs:
+            w.writerow([lab, data.get(dk, "0")])
+        w.writerow([])
+        w.writerow(["【收租明细】共 %d 笔" % len(pays)])
+        w.writerow(["房间号", "租客", "金额(元)", "日期"])
+        for p in pays:
+            w.writerow([str(p.get("room", "")), str(p.get("name", "")),
+                        str(p.get("money", "")), str(p.get("date", ""))])
+        w.writerow([])
+        w.writerow(["【水电明细】共 %d 笔" % len(utils)])
+        w.writerow(["房间号", "月份", "电费(元)", "水费(元)"])
+        for u in utils:
+            w.writerow([str(u.get("room", "")), str(u.get("month", "")),
+                        str(u.get("elec", "")), str(u.get("water", ""))])
+        # BOM：不加 Excel 打开中文全是乱码
+        out = "\ufeff" + buf.getvalue()
+        name = "统计_%s.csv" % (label.replace(" ", "").replace("-", ""))
+        path = self._write_public(name, out)
+        if path:
+            info_popup("导出成功",
+                       "「%s」的统计数据已保存到：\n%s\n\n"
+                       "汇总 10 项 · 收租 %d 笔 · 水电 %d 笔，\n用 Excel / WPS 打开即可。"
+                       % (label, path, len(pays), len(utils)))
+        else:
+            self.toast("导出失败：没有可写的存储目录")
 
     def _section(self, title, right=""):
         row = BoxLayout(size_hint_y=None, height=dp(34))
@@ -1245,10 +1567,9 @@ class BaozupoApp(App):
             return
         self.store.load()
         scr = self.sm.get_screen("houses")
-        try:
-            self.search_key = scr.ids.search.text
-        except Exception:
-            pass
+        # 搜索词以 self.search_key 为准，不再从输入框回读：
+        # 旧实现每次都 ti.text -> search_key，会把程序设置的关键词（如首页搜索带过来的）
+        # 直接覆盖掉，表现为「点了搜索但列表没变」。输入框那边由 on_text 回调负责同步进来。
         key = (self.search_key or "").strip().lower()
         filt = self.filter_status
         rows = []
@@ -1259,10 +1580,8 @@ class BaozupoApp(App):
             if filt != "全部" and st != filt:
                 continue
             t = self.store.current_tenant(room)
-            pf = " ".join([room, str(h.get("address", "")), st,
-                           str(h.get("area", "")), str(h.get("price", "")),
-                           (t or {}).get("name", ""), (t or {}).get("tel", "")]).lower()
-            if key and key not in pf:
+            # 原来只能整串匹配（"张三 138" 搜不到），现在支持空格分词 + 全字段（含配套）
+            if not self.match_tokens(self.house_haystack(h), key):
                 continue
             rented = (st == "已租")
             fac = "厨:%s  卫:%s  阳台:%s" % (h.get("kitchen", "无"), h.get("toilet", "无"),
@@ -1291,7 +1610,10 @@ class BaozupoApp(App):
             })
         rv = scr.ids.rv
         rv.data = rows
-        scr.ids.count.text = "共 %d 套（筛选：%s）" % (len(rows), filt)
+        tip = "共 %d 套（状态：%s）" % (len(rows), filt)
+        if key:
+            tip += "  搜索「%s」" % (self.search_key or "").strip()
+        scr.ids.count.text = tip
         if not rows:
             rv.data = []
 

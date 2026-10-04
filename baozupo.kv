@@ -228,12 +228,14 @@
                     pos: self.pos
                     size: self.size
             Label:
+                id: title
                 text: '实时统计'
                 font_size: sp(16)
                 color: (1, 1, 1, 1)
                 halign: 'left'
                 valign: 'middle'
                 text_size: self.size
+                shorten: True
             Label:
                 text: '包租婆 · 出租屋管家'
                 font_size: sp(11)
@@ -259,36 +261,70 @@
         orientation: 'vertical'
         BoxLayout:
             size_hint_y: None
-            height: dp(58)
+            height: dp(104)
+            orientation: 'vertical'
             padding: dp(8), dp(6)
             spacing: dp(6)
-            TextInput:
-                id: search
-                hint_text: '搜房间号 / 地址 / 租客'
-                multiline: False
-                font_size: sp(13)
-                background_color: (1, 1, 1, 1)
-                foreground_color: C_TEXT
-                cursor_color: C_ACCENT
-                padding: dp(10), dp(12), dp(10), dp(12)
-                on_text_validate: app.refresh_houses()
-            Spinner:
-                id: filt
-                text: '全部'
-                values: ['全部', '已租', '空闲']
-                size_hint_x: None
-                width: dp(80)
-                font_size: sp(13)
-                color: C_TEXT
-                on_text: app.on_filter_change(self, self.text)
-            Button:
-                text: '＋新增'
-                size_hint_x: None
-                width: dp(72)
-                font_size: sp(13)
-                background_color: C_ACCENT
-                color: (1, 1, 1, 1)
-                on_release: app.open_house_form('add')
+            BoxLayout:
+                size_hint_y: None
+                height: dp(44)
+                spacing: dp(6)
+                TextInput:
+                    id: search
+                    hint_text: '搜房间号 / 地址 / 租客（空格分多词）'
+                    multiline: False
+                    font_size: sp(13)
+                    background_color: (1, 1, 1, 1)
+                    foreground_color: C_TEXT
+                    cursor_color: C_ACCENT
+                    padding: dp(10), dp(12), dp(10), dp(12)
+                    # 原来只有按回车（on_text_validate）才过滤，用户以为搜索坏了
+                    on_text: app.on_search_change(self.text)
+                Button:
+                    text: '搜索'
+                    size_hint_x: None
+                    width: dp(56)
+                    font_size: sp(13)
+                    background_color: C_ACCENT
+                    color: (1, 1, 1, 1)
+                    on_release: app.search_from_input()
+                Button:
+                    text: '清空'
+                    size_hint_x: None
+                    width: dp(52)
+                    font_size: sp(13)
+                    background_color: C_INFO
+                    color: (1, 1, 1, 1)
+                    on_release: app.clear_search()
+            BoxLayout:
+                size_hint_y: None
+                height: dp(42)
+                spacing: dp(6)
+                Spinner:
+                    id: filt
+                    text: '全部'
+                    values: ['全部', '已租', '空闲']
+                    size_hint_x: None
+                    width: dp(88)
+                    font_size: sp(13)
+                    color: C_TEXT
+                    on_text: app.on_filter_change(self, self.text)
+                Label:
+                    text: '双击卡片看详情'
+                    font_size: sp(11)
+                    color: C_MUTED
+                    halign: 'left'
+                    valign: 'middle'
+                    text_size: self.size
+                    shorten: True
+                Button:
+                    text: '＋新增'
+                    size_hint_x: None
+                    width: dp(72)
+                    font_size: sp(13)
+                    background_color: C_ACCENT
+                    color: (1, 1, 1, 1)
+                    on_release: app.open_house_form('add')
         Label:
             id: count
             text: ''
