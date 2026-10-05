@@ -127,7 +127,7 @@ jobs:
             exit 1
           fi
 
-      - name: zipalign + 签名（否则手机报「未签名，无法安装」）
+      - name: 干净签名（否则手机报「没有任何证书，安装失败」）
         run: |
           set +e
           ZIPALIGN=$(find /github/home /root /opt /usr/local -maxdepth 8 -type f -name zipalign \
@@ -137,24 +137,31 @@ jobs:
             echo "::warning::找不到 zipalign/apksigner，本轮 APK 仍未签名"
           else
             BT=$(dirname "$ZIPALIGN")
+            # 关键：不能直接 apksigner sign。buildozer 出包时已经做过 v1 签名，
+            # 随后的 zipalign 会让那份 v1 失效，但坏掉的 MANIFEST.MF/*.SF/*.RSA
+            # 仍留在 META-INF 里。手机文件管理器优先读它，读到坏的就说
+            # 「没有任何证书」并不再回退 v2/v3 —— verify 明明过，真机却装不上。
+            # cleansign.py 先剔除这些残留，再 zipalign，最后只签 v2+v3。
+            # （脚本放仓库里而不是内联 heredoc：YAML 块标量会剥掉 heredoc 的
+            #   公共缩进，Python 收到带前导空格的代码直接 IndentationError。）
             for a in bin/*.apk; do
               b=$(basename "$a" .apk)
-              "$BT/zipalign" -p -f 4 "$a" "${b}_al.apk"
-              if [ -f "$BT/apksigner" ]; then
-                "$BT/apksigner" sign --ks .signing/app.keystore --ks-pass pass:baozupo2026 \
-                  --key-pass pass:baozupo2026 --ks-key-alias baozupo --out "${b}_sg.apk" "${b}_al.apk"
-                "$BT/apksigner" verify --print-certs "${b}_sg.apk"
-              else
-                java -cp "$BT/lib/apksigner.jar" com.android.apksigner.ApkSignerTool sign \
-                  --ks .signing/app.keystore --ks-pass pass:baozupo2026 \
-                  --key-pass pass:baozupo2026 --ks-key-alias baozupo --out "${b}_sg.apk" "${b}_al.apk"
-                java -cp "$BT/lib/apksigner.jar" com.android.apksigner.ApkSignerTool verify --print-certs "${b}_sg.apk"
+              python3 cleansign.py "$a" "${b}_cs.apk" "$BT" \
+                .signing/app.keystore baozupo2026 baozupo2026 baozupo
+              if [ $? -ne 0 ] || [ ! -f "${b}_cs.apk" ]; then
+                echo "::error::干净签名失败：$a"
+                exit 1
               fi
-              mv -f "${b}_sg.apk" "$a"
-              rm -f "${b}_al.apk"
+              mv -f "${b}_cs.apk" "$a"
             done
             echo "--- 签名后 ---"
             ls -lh bin/
+            if [ -f "$BT/apksigner" ]; then
+              "$BT/apksigner" verify --print-certs bin/*.apk
+            else
+              java -cp "$BT/lib/apksigner.jar" com.android.apksigner.ApkSignerTool \
+                verify --print-certs bin/*.apk
+            fi
           fi
 
       - name: 上传 APK
