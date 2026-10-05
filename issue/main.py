@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-包租婆授权码发码器（作者专用）  v1.1
+包租婆授权码发码器（作者专用）  v1.2
 ================================================================================
 只装在作者自己手机上。客户手机上的《包租婆出租屋管家》只含公钥，
 私钥只在本 App 内，且经 PIN 加密后落盘。
@@ -23,28 +23,239 @@
 import io
 import json
 import os
+import sys
 import time
 import traceback
 
-from kivy.app import App
-from kivy.clock import Clock
-from kivy.core.clipboard import Clipboard
-from kivy.core.text import LabelBase
-from kivy.metrics import dp, sp
-from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.button import Button
-from kivy.uix.label import Label
-from kivy.uix.popup import Popup
-from kivy.uix.scrollview import ScrollView
-from kivy.uix.textinput import TextInput
-from kivy.utils import platform
-
-import ecdsa_p256 as E
-import license_core as LC
-import vault as V
-
+# ==============================================================================
+# 【诊断引导块】必须排在任何 kivy import 之前。
+#
+# 这就是 v1.0 / v1.1「点开就闪退、界面上一次错误都看不到」的最终根因：
+#   kivy 2.3.1 的 kivy/core/image/__init__.py 里有 import filetype，
+#   而本项目用的本地 kivy recipe 去掉了 python_depends，filetype 不会自动进包；
+#   APK 里没有 filetype -> import kivy.core.image 抛 ModuleNotFoundError。
+#   裸 import 失败会**直接把进程杀掉**，Python 层任何 try/except 都来不及接管，
+#   所以既看不到 Kivy 的错误页，也没有 traceback —— 表现就是「静默闪退」。
+#
+# 两条对策：
+#   ① 把 filetype 源码随工程打包，并在导入 kivy 之前塞进 sys.path（主 App 已验证）
+#   ② 每条 kivy import 单独包一层，失败立刻取证：日志 + 剪贴板 + 原生弹窗
+#      （用 jnius 直调 Android API，不依赖 Kivy，Kivy 挂了也照样弹得出来）
+# ==============================================================================
 APP_TITLE = "包租婆发码器"
-VERSION = "1.1"
+VERSION = "1.2"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+FONT_PATH = os.path.join(BASE_DIR, "fonts", "simhei.ttf")
+
+_STAGE = "S0 脚本开始执行"
+_LINES = []
+_FILES = []
+
+
+def _diag_paths():
+    """列出所有可能可写的日志路径（按成功率排序）"""
+    out = []
+    for env in ("ANDROID_PRIVATE", "ANDROID_ARGUMENT", "ANDROID_APP_PATH",
+                "EXTERNAL_STORAGE", "HOME", "TMPDIR"):
+        try:
+            p = os.environ.get(env)
+            if p:
+                out.append(os.path.join(p, "bzq_diag.txt"))
+                out.append(os.path.join(os.path.dirname(p.rstrip("/")),
+                                        "bzq_diag.txt"))
+        except Exception:
+            pass
+    for d in ("/sdcard/Download", "/storage/emulated/0/Download",
+              "/data/local/tmp"):
+        out.append(os.path.join(d, "bzq_diag.txt"))
+    out.append(os.path.join(BASE_DIR, "bzq_diag.txt"))
+    uniq = []
+    for p in out:
+        if p and p not in uniq:
+            uniq.append(p)
+    return uniq
+
+
+def _diag_write(text):
+    try:
+        _LINES.append(text)
+        if len(_LINES) > 400:
+            del _LINES[:-400]
+    except Exception:
+        pass
+    for p in _FILES:
+        try:
+            with io.open(p, "a", encoding="utf-8") as f:
+                f.write(text + "\n")
+        except Exception:
+            pass
+
+
+def _diag_init():
+    for p in _diag_paths():
+        try:
+            d = os.path.dirname(p)
+            if d and not os.path.isdir(d):
+                os.makedirs(d, exist_ok=True)
+            with io.open(p, "a", encoding="utf-8") as f:
+                f.write("\n##### 发码器 %s 启动 %s #####\n"
+                        % (VERSION, time.strftime("%Y-%m-%d %H:%M:%S")))
+            _FILES.append(p)
+        except Exception:
+            continue
+    _diag_write("日志文件候选: %s" % (_FILES or "全部不可写"))
+
+
+def _is_android():
+    return "ANDROID_ARGUMENT" in os.environ or "ANDROID_APP_PATH" in os.environ
+
+
+def _diag_clip(text):
+    """原生剪贴板（不经 Kivy）：Kivy 崩了也能把线索带出来。"""
+    if not _is_android():
+        return
+    try:
+        from jnius import autoclass, cast
+        act = autoclass("org.kivy.android.PythonActivity").mActivity
+        Context = autoclass("android.content.Context")
+        cm = cast("android.content.ClipboardManager",
+                  act.getSystemService(Context.CLIPBOARD_SERVICE))
+        ClipData = autoclass("android.content.ClipData")
+        S = autoclass("java.lang.String")
+        cm.setPrimaryClip(ClipData.newPlainText(S("发码器诊断"),
+                                                S(text[:4000])))
+    except Exception:
+        pass
+
+
+def _diag_alert(text):
+    """原生 AlertDialog，失败降级 Toast。必须在 UI 线程 show。"""
+    if not _is_android():
+        return
+    try:
+        from jnius import autoclass, PythonJavaClass, java_method
+        act = autoclass("org.kivy.android.PythonActivity").mActivity
+        AlertDialog = autoclass("android.app.AlertDialog")
+        builder = AlertDialog.Builder(act)
+        builder.setTitle("发码器启动失败")
+        builder.setMessage(text[:3000])
+        builder.setPositiveButton("关闭", None)
+
+        class _Run(PythonJavaClass):
+            __javainterfaces__ = ["java/lang/Runnable"]
+
+            @java_method("()V")
+            def run(self):
+                try:
+                    builder.show()
+                except Exception:
+                    pass
+
+        act.runOnUiThread(_Run())
+    except Exception:
+        try:
+            from jnius import autoclass
+            act = autoclass("org.kivy.android.PythonActivity").mActivity
+            Toast = autoclass("android.widget.Toast")
+            S = autoclass("java.lang.String")
+            Toast.makeText(act, S(text[:150]), Toast.LENGTH_LONG).show()
+        except Exception:
+            pass
+
+
+def _diag_env():
+    try:
+        _diag_write("python: %s" % sys.version.replace("\n", " "))
+        _diag_write("argv: %r" % (sys.argv,))
+        _diag_write("platform: %s" % sys.platform)
+        _diag_write("__file__: %s" % os.path.abspath(__file__))
+        try:
+            _diag_write("cwd: %s" % os.getcwd())
+        except Exception:
+            pass
+        for k in sorted(os.environ):
+            if k.startswith("ANDROID") or k in ("EXTERNAL_STORAGE", "TMPDIR",
+                                                "HOME", "P4A_BOOTSTRAP",
+                                                "KIVY_WINDOW", "PYTHONHOME"):
+                _diag_write("  %s = %r" % (k, os.environ.get(k)))
+        for sub in ("filetype", "fonts"):
+            _diag_write("  dir %s/: %s" % (sub,
+                        os.path.isdir(os.path.join(BASE_DIR, sub))))
+    except Exception:
+        pass
+
+
+def _diag_crash(stage, err):
+    """崩溃取证：日志 + 剪贴板 + 原生弹窗，然后退出。"""
+    try:
+        tb = "".join(traceback.format_exception(type(err), err,
+                                                err.__traceback__))
+    except Exception:
+        tb = repr(err)
+    msg = "【发码器 %s】\n崩溃阶段: %s\n\n%s" % (VERSION, stage, tb)
+    _diag_write("!! 崩溃 %s\n%s" % (stage, tb))
+    _diag_clip(msg)
+    _diag_alert(msg)
+    try:
+        time.sleep(3)   # 给 UI 线程时间把弹窗画出来
+    except Exception:
+        pass
+    # 不用 sys.exit：p4a 下 SystemExit 同样会被吞成「无声闪退」
+    os._exit(1)
+
+
+def _diag_step(stage, code):
+    """执行一条 import（用 exec 注入模块全局），失败立刻取证。"""
+    global _STAGE
+    _STAGE = stage
+    _diag_write(">> " + stage)
+    try:
+        exec(code, globals())
+    except BaseException as _e:
+        _diag_crash(stage, _e)
+
+
+_diag_init()
+_diag_env()
+_diag_write("发码器 %s 开始启动" % VERSION)
+
+# ---- filetype 兜底：缺它，下面的 S1.10 会直接把进程带走 ----
+try:
+    if BASE_DIR not in sys.path:
+        sys.path.insert(0, BASE_DIR)
+    import filetype as _ft
+    _diag_write("filetype OK -> %s" % getattr(_ft, "__file__", "?"))
+except BaseException as _e:
+    _diag_write("!! filetype 不可用: %r" % (_e,))
+    # 不在这里退出：交给下面 S1.10 取证，好让用户看到真实 traceback
+
+_diag_step("S1.1 import kivy", "import kivy")
+_diag_write("     kivy=%s" % getattr(kivy, "__version__", "?"))
+_diag_step("S1.2 kivy.utils", "from kivy.utils import platform")
+_diag_step("S1.3 kivy.config", "from kivy.config import Config")
+_diag_step("S1.4 kivy.clock", "from kivy.clock import Clock")
+_diag_step("S1.5 kivy.metrics", "from kivy.metrics import dp, sp")
+_diag_step("S1.6 kivy.core.window (SDL2 窗口)",
+           "import kivy.core.window as _winmod")
+_diag_step("S1.7 kivy.graphics", "import kivy.graphics")
+_diag_step("S1.8 kivy.core.text", "from kivy.core.text import LabelBase")
+_diag_step("S1.9 kivy.core.clipboard",
+           "from kivy.core.clipboard import Clipboard")
+_diag_step("S1.10 kivy.core.image（filetype 缺失就死在这一步）",
+           "import kivy.core.image as _imgmod")
+_diag_step("S1.11 kivy.app", "from kivy.app import App")
+_diag_step("S1.12 kivy.uix 基础控件",
+           "from kivy.uix.boxlayout import BoxLayout; "
+           "from kivy.uix.button import Button; "
+           "from kivy.uix.label import Label; "
+           "from kivy.uix.textinput import TextInput")
+_diag_step("S1.13 kivy.uix 弹窗/滚动",
+           "from kivy.uix.popup import Popup; "
+           "from kivy.uix.scrollview import ScrollView")
+_diag_step("S2 业务模块",
+           "import ecdsa_p256 as E; import license_core as LC; "
+           "import vault as V")
+_diag_write("S3 全部 import 完成")
 
 # 颜色（与主 App 同一套暖色系）
 C_BG = (0.16, 0.16, 0.18, 1)
@@ -56,8 +267,6 @@ C_INFO = (0.25, 0.47, 0.78, 1)
 C_OK = (0.25, 0.60, 0.35, 1)
 C_WARN = (0.80, 0.35, 0.32, 1)
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-FONT_PATH = os.path.join(BASE_DIR, "fonts", "simhei.ttf")
 HISTORY_FILE = "bzq_history.json"
 
 
@@ -200,15 +409,30 @@ class IssueApp(App):
 
     # ------------------------------------------------------------------ 界面
     def build(self):
-        if FONT_PATH and os.path.exists(FONT_PATH):
-            LabelBase.register(name="CN", fn_regular=FONT_PATH)
-        self.load_history()
-        d = ensure_dir()
-        if not V.vault_exists(d):
-            self.root_box = self.ui_setup()
-        else:
-            self.root_box = self.ui_lock()
-        return self.root_box
+        # 分步打点：真机闪退时靠 lines 判断崩在哪一步
+        _diag_write(">> B1 build() entered")
+        try:
+            if FONT_PATH and os.path.exists(FONT_PATH):
+                _diag_write("     B2 字体存在 size=%d"
+                            % os.path.getsize(FONT_PATH))
+                LabelBase.register(name="CN", fn_regular=FONT_PATH)
+                _diag_write("     B3 字体注册完成")
+            else:
+                _diag_write("     B2 字体缺失 %r" % (FONT_PATH,))
+            self.load_history()
+            _diag_write("     B4 历史载入 %d 条" % len(self.history))
+            d = ensure_dir()
+            _diag_write("     B5 数据目录 %r" % (d,))
+            if not V.vault_exists(d):
+                _diag_write("     B6 无 vault -> 首次设置界面")
+                self.root_box = self.ui_setup()
+            else:
+                _diag_write("     B6 有 vault -> 解锁界面")
+                self.root_box = self.ui_lock()
+            _diag_write("     B7 界面构建完成")
+            return self.root_box
+        except BaseException as _e:
+            _diag_crash("build() 阶段 %s" % _STAGE, _e)
 
     def _lbl(self, text, size=13, color=None, h=None, align="left"):
         # 注意：默认参数里绝不能写 dp()，类体在 import 时求值，
@@ -478,7 +702,10 @@ class IssueApp(App):
         try:
             tb = "".join(traceback.format_exception(type(exc), exc,
                                                      exc.__traceback__))
-            _err_log("运行期异常（Kivy 捕获）: %s\n%s" % (type(exc).__name__, tb))
+            _diag_write("!! 运行期异常（Kivy 捕获）: %s\n%s"
+                        % (type(exc).__name__, tb))
+            _diag_clip("【发码器错误】%s\n\n%s" % (type(exc).__name__, tb[:2500]))
+            _diag_alert("【发码器运行出错】\n%s\n%s" % (type(exc).__name__, tb[:2000]))
             try:
                 Clipboard.copy("【发码器错误】%s\n\n%s"
                                % (type(exc).__name__, tb[:1200]))
@@ -489,22 +716,44 @@ class IssueApp(App):
         return False
 
 
-def _err_log(text):
-    """把错误写到多个候选位置，全失败也无所谓（不能因日志再崩）。"""
-    for d in (lambda: data_dir(), lambda: os.path.join(BASE_DIR, "_localdata"),
-              lambda: os.path.expanduser("~")):
-        try:
-            p = d()
-            if not p:
+def _extra_dirs():
+    """额外的、用户用文件管理器能看到的目录。
+
+    Android 11+ 的分区存储下，写 /sdcard 根目录需要权限（发码器故意不申请），
+    但 app 专属外部目录（/storage/emulated/0/Android/data/<pkg>/files）
+    不需要任何权限，用文件管理器「内部存储 → Android → data → 包租婆发码器」能看到。
+    """
+    out = []
+    if platform == "android":
+        for mod, fn in (("android.storage", "app_storage_path"),
+                        ("android", "get_external_files_dir")):
+            try:
+                m = __import__(mod, fromlist=[fn])
+                f = getattr(m, fn, None)
+                if f is None:
+                    continue
+                d = f(None) if fn == "get_external_files_dir" else f()
+                if d:
+                    out.append(d)
+                    out.append(os.path.dirname(d))   # Android/data/<pkg>
+            except Exception:
                 continue
-            if not os.path.isdir(p):
-                os.makedirs(p, exist_ok=True)
-            with open(os.path.join(p, "error.log"), "a", encoding="utf-8") as f:
-                f.write("\n=== %s ===\n%s\n" % (now_str(), text))
-            return True
+    for p in ("/sdcard", "/storage/emulated/0"):
+        try:
+            out.append(p)
+            out.append(os.path.join(p, "Download"))
         except Exception:
-            continue
-    return False
+            pass
+    return out
+
+
+def _err_log(text):
+    """记录一条错误。统一走诊断通道，全失败也无所谓（不能因日志再崩）。"""
+    try:
+        _diag_write(text)
+        return True
+    except Exception:
+        return False
 
 
 def _show_crash(text):
@@ -537,18 +786,38 @@ def _show_crash(text):
 
 
 def main():
-    IssueApp().run()
+    _diag_write(">> M1 main() entered")
+    app = IssueApp()
+    _diag_write("     M2 app 构造完成")
+    try:
+        app.run()
+    except BaseException as _e:
+        # Kivy 的 App.run() 在部分失败路径下走 sys.exit()，try/except 抓不到，
+        # 这里统一转成异常，好让外层有机会取证。
+        raise RuntimeError("app.run() 失败: %r" % (_e,))
+    _diag_write("     M3 app.run() 正常返回")
 
 
 if __name__ == "__main__":
-    # 启动失败不要直接闪退：写日志 + 显示错误界面。
+    # 启动失败不要直接闪退：日志 + 剪贴板 + 原生弹窗 + Kivy 错误界面。
     # 真机「点开就闪退」时，这一层是唯一能拿到原因的地方。
     try:
         main()
-    except BaseException as e:
-        _tb = traceback.format_exc()
-        _err_log("!!! 启动失败: %s" % _tb)
-        _show_crash(
-            "包租婆发码器 %s 启动失败\n\n%s\n\n"
-            "请截图此页面发给开发者。\n"
-            "（错误也已写入 error.log）" % (VERSION, _tb))
+    except BaseException as _e:
+        try:
+            _tb = traceback.format_exc()
+            _msg = "【发码器 %s 启动失败】\n阶段: %s\n\n%s" % (VERSION, _STAGE, _tb)
+            _diag_write("!! 启动失败\n%s" % _tb)
+            _diag_clip(_msg)
+            _diag_alert(_msg)
+        except Exception:
+            pass
+        try:
+            _show_crash(
+                "包租婆发码器 %s 启动失败\n\n%s\n\n"
+                "启动阶段记录:\n%s\n\n"
+                "请截图此页面发给开发者。\n"
+                "（同样的内容也已写进剪贴板，和 bzq_diag.txt）"
+                % (VERSION, traceback.format_exc(), "\n".join(_LINES[-40:])))
+        except Exception:
+            os._exit(1)

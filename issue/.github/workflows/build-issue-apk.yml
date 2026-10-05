@@ -1,0 +1,180 @@
+name: 打包发码器APK
+
+# 官方 kivy/buildozer 容器。发码器与主 App 共用同一套构建链路，
+# 只是 package.name 不同（bzqissue vs baozupo），两者可并存于同一台手机。
+on:
+  workflow_dispatch:
+  push:
+    branches: [ issue-apk ]
+
+jobs:
+  build-issue-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    container:
+      image: kivy/buildozer:latest
+      options: --user root
+
+    defaults:
+      run:
+        working-directory: issue
+
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      # 与主 App 相同的 keystore 策略：Actions cache 持久化，
+      # 首次 keytool 生成，之后每次复用同一份证书（两边同 key，签名一致）。
+      - name: 恢复签名 keystore
+        uses: actions/cache@v4
+        with:
+          path: issue/.signing
+          key: baozupo-signing-keystore-v1
+
+      - name: 若无则生成 keystore
+        run: |
+          set -e
+          mkdir -p .signing
+          if [ ! -f .signing/app.keystore ]; then
+            echo "首次运行：生成 keystore"
+            keytool -genkeypair -v -keystore .signing/app.keystore -storetype PKCS12 \
+              -storepass baozupo2026 -keypass baozupo2026 -alias baozupo \
+              -keyalg RSA -keysize 2048 -validity 18250 \
+              -dname "CN=Baozupo Issue, OU=Rental, O=Baozupo, L=Guangzhou, ST=GD, C=CN"
+          fi
+          keytool -list -v -keystore .signing/app.keystore -storepass baozupo2026 \
+            -alias baozupo | grep -E 'SHA1:' || true
+
+      - name: 借用主 App 的中文字体（避免仓库里塞两份 13MB 字体）
+        run: |
+          set -e
+          mkdir -p fonts
+          if [ ! -f fonts/simhei.ttf ]; then
+            cp ../fonts/simhei.ttf fonts/simhei.ttf
+          fi
+          ls -l fonts/
+
+      - name: 缓存 buildozer 环境
+        uses: actions/cache@v4
+        with:
+          path: |
+            /github/home/.buildozer
+            /github/home/.gradle
+            /root/.buildozer
+            .buildozer
+          # v2：上一轮因 workflow 缩进坏掉、buildozer 没真正启动，
+          # 缓存里是半成品环境，换 key 强制重跑
+          key: buildozer-issue-v2-${{ hashFiles('issue/buildozer.spec') }}
+
+      - name: 定位 buildozer / p4a
+        run: |
+          set -e
+          bz=$(command -v buildozer || find / -name buildozer -type f 2>/dev/null | head -1)
+          echo "buildozer at: $bz"
+          "$bz" --version || true
+          echo "NDK dirs:"; ls -d /github/home/.buildozer/android/platform/android-ndk-* 2>/dev/null || true
+
+      - name: 清理 p4a 产物并打包
+        run: |
+          set -e
+          # 清除本机 Windows 路径行，使用容器内置的 SDK/NDK/JDK。
+          # 少了这一步，buildozer 会去找 C:/Users/L540/... 而直接失败。
+          #
+          # 用 sed 而非 python3 heredoc：YAML 块标量会把 heredoc 内容的公共缩进
+          # 剥掉，Python 收到带前导空格的代码 -> IndentationError。
+          # （两种写法各踩一次：顶格写 YAML 会当 shell 命令；缩进写 Python 会
+          #   IndentationError。sed 完全绕开这个坑。）
+          sed -i '/^[[:space:]]*android\.sdk_path/d' buildozer.spec
+          sed -i '/^[[:space:]]*android\.ndk_path/d'  buildozer.spec
+          sed -i '/^[[:space:]]*java\.home/d'         buildozer.spec
+          echo "--- spec 生效配置 ---"
+          grep -E '^android\.(ndk|api|minapi|archs)' buildozer.spec || true
+          # 硬断言：本机路径必须已清干净，否则 buildozer 会去找不存在的 C:/...
+          if grep -q 'L540' buildozer.spec; then
+            echo "::error::buildozer.spec 仍含本机路径，buildozer 必然失败"
+            grep -n 'L540' buildozer.spec
+            exit 1
+          fi
+          echo "本机路径已清空（0 命中）"
+
+          # 用容器里 buildozer 自己的 Python 预检 spec（必须在 sed 之后跑）。
+          # 起因：android.allow_backup 写成 False，容器内 Python 3.14 的
+          # configparser.getboolean() 抛 ValueError，而错误发生在
+          # 「Package the application」之后，症状只是「bin/ 里没有 APK」，
+          # 不预检根本定位不到是哪个键。
+          # 逻辑放在 prespec.py（而不是内联 heredoc）：YAML 块标量会剥掉
+          # heredoc 内容的公共缩进，Python 收到带前导空格的代码就 IndentationError
+          # （顶格写则被当 shell 命令，这个坑连踩两次）。
+          python3 prespec.py buildozer.spec
+          echo "spec 预检通过"
+          rm -rf .buildozer/android/platform/build .buildozer/android/platform/build-*
+          set +o pipefail
+          set +e
+          yes | buildozer -v android debug 2>&1 | tee build.log
+          echo "--- bin 目录内容 ---"
+          ls -l bin/ || true
+          # 硬断言：buildozer 确实跑起来了（build.log 应该有大量输出）
+          LINES=$(wc -l < build.log 2>/dev/null || echo 0)
+          echo "build.log 行数 = $LINES"
+          if [ "$LINES" -lt 50 ]; then
+            echo "::error::buildozer 输出只有 $LINES 行，说明没真正启动"
+            tail -30 build.log || true
+            exit 1
+          fi
+          if ! ls bin/*.apk >/dev/null 2>&1; then
+            echo "::error::bin/ 里没有 APK"
+            tail -40 build.log || true
+            exit 1
+          fi
+
+      - name: zipalign + 签名（否则手机报「未签名，无法安装」）
+        run: |
+          set +e
+          ZIPALIGN=$(find /github/home /root /opt /usr/local -maxdepth 8 -type f -name zipalign \
+                     -path '*/build-tools/*' 2>/dev/null | sort | tail -1)
+          echo "zipalign -> [$ZIPALIGN]"
+          if [ -z "$ZIPALIGN" ]; then
+            echo "::warning::找不到 zipalign/apksigner，本轮 APK 仍未签名"
+          else
+            BT=$(dirname "$ZIPALIGN")
+            for a in bin/*.apk; do
+              b=$(basename "$a" .apk)
+              "$BT/zipalign" -p -f 4 "$a" "${b}_al.apk"
+              if [ -f "$BT/apksigner" ]; then
+                "$BT/apksigner" sign --ks .signing/app.keystore --ks-pass pass:baozupo2026 \
+                  --key-pass pass:baozupo2026 --ks-key-alias baozupo --out "${b}_sg.apk" "${b}_al.apk"
+                "$BT/apksigner" verify --print-certs "${b}_sg.apk"
+              else
+                java -cp "$BT/lib/apksigner.jar" com.android.apksigner.ApkSignerTool sign \
+                  --ks .signing/app.keystore --ks-pass pass:baozupo2026 \
+                  --key-pass pass:baozupo2026 --ks-key-alias baozupo --out "${b}_sg.apk" "${b}_al.apk"
+                java -cp "$BT/lib/apksigner.jar" com.android.apksigner.ApkSignerTool verify --print-certs "${b}_sg.apk"
+              fi
+              mv -f "${b}_sg.apk" "$a"
+              rm -f "${b}_al.apk"
+            done
+            echo "--- 签名后 ---"
+            ls -lh bin/
+          fi
+
+      - name: 上传 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: bzq-issue-apk
+          path: issue/bin/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      # 失败时把 build.log 也传上来：run 日志动辄 1.5MB 且大半是 CPython
+      # 编译 stdlib 的正常噪音，真正的原因藏在最后几行。直接下这个文件快得多。
+      - name: 上传构建日志（便于排查）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bzq-issue-buildlog
+          path: |
+            issue/build.log
+            issue/buildozer.spec
+            issue/.buildozer/android/platform/build-*/dists/*/*.log
+          if-no-files-found: ignore
+          retention-days: 7

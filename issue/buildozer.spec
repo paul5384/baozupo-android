@@ -14,11 +14,22 @@ package.domain = org.baozupo
 
 source.dir = .
 source.include_exts = py,kv,png,jpg,jpeg,ttf,json,atlas,ico
-source.include_patterns = fonts/*,assets/*
-# CI 专用的 spec 自检脚本与测试文件，不必进包
-source.exclude_patterns = prespec.py,_test_*.py,shots/*,*.log
+source.include_patterns = fonts/*,assets/*,filetype/*,filetype/types/*
 
-version = 1.1
+# 注意这三行的来历（v1.0/v1.1 真机闪退的根因就在这）：
+#   kivy 2.3.1 的 kivy/core/image/__init__.py 第 65 行裸写
+#   `from filetype import guess_extension`，而本地 kivy recipe 去掉了
+#   python_depends，filetype 不会自动进包，APK 里没有它就 ImportError，
+#   裸 import 失败直接杀进程 => 界面上一次错误都看不到，只有「闪退」。
+#   所以：① filetype 必须随源码打包（上面的 include_patterns）
+#        ② main.py 在 import kivy 之前先把它塞进 sys.path
+#
+# CI 专用的 spec 自检脚本、测试文件、本机调试产物，不必进包
+# 注意：这里必须写成一行。试过用反斜杠续行，configparser 会把 '\' 和换行
+# 原样塞进值里（'...*.log,\\\nbzq_probe.txt...'），exclude 规则直接失效。
+source.exclude_patterns = prespec.py,_depcheck.py,_test_*.py,_probe_test.py,shots/*,*.log,bzq_probe.txt,probe_*.txt,bzq_diag.txt,_kivy_src/*,_*.txt
+
+version = 1.2
 
 requirements = hostpython3==3.11.9,python3==3.11.9,kivy
 

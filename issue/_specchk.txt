@@ -1,0 +1,16 @@
+prespec: python 3.11.9, file buildozer.spec
+  OK   app.fullscreen = '0'
+  OK   app.android.accept_license = 'yes'
+  OK   app.android.allow_backup = '0'
+  OK   app.android.accept_sdk_license = 'True'
+  OK   app.android.wakelock = 'False'
+  OK   app.android.private_storage = 'True'
+  OK   app.android.enable_androidx = 'True'
+  FAIL app.android.sdk_path 含本机路径
+  FAIL app.android.ndk_path 含本机路径
+  FAIL app.java.home 含本机路径
+
+::error::buildozer.spec 有 3 个问题：
+   app.android.sdk_path = 'C:/Users/L540/android-build/android-sdk'  -> 含本机 Windows 路径，云端不可用
+   app.android.ndk_path = 'C:/Users/L540/android-build/android-ndk/android-ndk-r25b'  -> 含本机 Windows 路径，云端不可用
+   app.java.home = 'C:/Users/L540/android-build/jdk'  -> 含本机 Windows 路径，云端不可用

@@ -1,0 +1,15 @@
+_test_*.py
+_probe_test.py
+_depcheck.py
+_*_out.txt
+_*.log
+_localdata/
+_kivy_src/
+bzq_probe.txt
+probe_*.txt
+bzq_diag.txt
+__pycache__/
+.buildozer/
+bin/
+.signing/
+build.log

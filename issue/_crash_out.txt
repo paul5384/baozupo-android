@@ -1,0 +1,34 @@
+  .. 1/5 android 模块不存在
+[OK ] 场景1 android 模块缺失 -> 不抛异常  C:\Users\L540\.bzqissue
+[OK ] 场景1 目录可写
+  .. 2/5 pyjnius 未就绪
+[OK ] 场景2 pyjnius 未就绪 -> 不抛异常  C:\Users\L540\.bzqissue
+[OK ] 场景2 目录可写
+  .. 3/5 路径不可写
+[OK ] 场景3 路径不可写 -> 不抛异常  C:\Users\L540\.bzqissue
+[OK ] 场景3 确实没选那个不可写目录  C:\Users\L540\.bzqissue
+  .. 4/5 返回 None
+[OK ] 场景4 返回 None -> 不抛异常  C:\Users\L540\.bzqissue
+[OK ] 场景4 目录可写
+  .. 5/5 深路径不存在
+[OK ] 场景5 深路径 -> 不抛异常  C:\Users\L540\.bzqissue
+[OK ] 场景5 目录可写
+  .. 6/6 极端场景下 build()
+[OK ] build() 在 data_dir 可用时正常  BoxLayout
+  .. 7/7 ensure_dir 幂等
+[OK ] ensure_dir 两次调用不抛异常
+[OK ] ensure_dir 返回可用目录  C:\Users\L540\AppData\Local\Temp\bzq_build_ggn1cfaw
+  .. 8/8 崩溃兜底
+[OK ] _err_log 可调用且落盘成功  True
+[OK ] _show_crash 函数存在
+[OK ] IssueApp.handle_exception 存在
+[OK ] __main__ 块包了 try/except BaseException
+[OK ] main.py 导入了 traceback
+  .. 9/9 filetype 兜底
+[OK ] filetype 目录随工程打包  C:\Users\L540\Desktop\python\包租婆\发码器\filetype
+[OK ] filetype/__init__.py 存在
+[OK ] 源码里有 filetype 兜底导入  225
+[OK ] filetype 兜底排在导入 kivy 之前  filetype@225 < kivy@231
+[OK ] filetype 可被真实导入  C:\Users\L540\Desktop\python\包租婆\发码器\filetype\__init__.py
+
+=== 23/23 ===
