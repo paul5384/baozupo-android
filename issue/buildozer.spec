@@ -27,7 +27,7 @@ source.include_patterns = fonts/*,assets/*,filetype/*,filetype/types/*
 # CI 专用的 spec 自检脚本、测试文件、本机调试产物，不必进包
 # 注意：这里必须写成一行。试过用反斜杠续行，configparser 会把 '\' 和换行
 # 原样塞进值里（'...*.log,\\\nbzq_probe.txt...'），exclude 规则直接失效。
-source.exclude_patterns = prespec.py,_depcheck.py,_test_*.py,_probe_test.py,shots/*,*.log,bzq_probe.txt,probe_*.txt,bzq_diag.txt,_kivy_src/*,_*.txt
+source.exclude_patterns = prespec.py,_depcheck.py,_test_*.py,_probe_test.py,shots/*,*.log,bzq_probe.txt,probe_*.txt,bzq_diag.txt,_kivy_src/*,_*.txt,cleansign.py,resign_local.py
 
 version = 1.2
 

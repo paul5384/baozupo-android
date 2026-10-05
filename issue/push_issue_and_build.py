@@ -37,10 +37,13 @@ TMP = r"C:\Users\L540\Desktop\python\包租婆\_issue_push"
 OUT_DIR = r"C:\Users\L540\Desktop\python\包租婆"
 
 IGNORE_DIRS = {".git", "__pycache__", ".buildozer", "bin", ".signing",
-               "_kivy_src", "_localdata"}
-IGNORE_PREFIX = ("_test_", "_repro_", "_depcheck", "_probe_")
+               "_kivy_src", "_localdata", "_exp"}
+# 这个仓库是 public：任何下划线开头的本机调试产物一律不推。
+# 之前只排除了 _test_/_repro_/_depcheck/_probe_，结果 _allverify.txt、
+# _sigchk.txt 之类带着本机路径和证书指纹的日志全被推上了公开仓库。
+IGNORE_PREFIX = ("_",)
 IGNORE_FILE = {"bzq_probe.txt", "bzq_diag.txt", "build.log", "prespec.py"}
-IGNORE_SUFFIX = (".log",)
+IGNORE_SUFFIX = (".log", ".txt")
 
 
 def clean(s):
@@ -212,7 +215,39 @@ def main():
     st, blob = api("GET", "/repos/%s/%s/actions/artifacts/%d/zip"
                    % (me, REPO, art["id"]), raw=True)
     if st != 200:
-        print("下载 artifact 失败", st); sys.exit(1)
+        # 401 通常不是权限问题：artifact 下载 URL 会 302 到带签名的 CDN 地址，
+        # urllib 自动重定向时会把 Authorization 头一起带过去，签发方直接 401。
+        # 必须自己拦下 Location，然后**不带 auth** 去取真实内容。
+        class _NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        for attempt in range(4):
+            try:
+                real = None
+                loc = API + "/repos/%s/%s/actions/artifacts/%d/zip" % (
+                    me, REPO, art["id"])
+                req = urllib.request.Request(loc)
+                req.add_header("Authorization", "Bearer " + TOKEN)
+                req.add_header("Accept", "application/vnd.github+json")
+                req.add_header("User-Agent", "bzq-issue-push")
+                opener = urllib.request.build_opener(_NoRedirect)
+                try:
+                    opener.open(req)
+                except urllib.error.HTTPError as e:
+                    real = e.headers.get("Location")
+                if not real:
+                    raise RuntimeError("拿不到重定向地址")
+                with urllib.request.urlopen(real, timeout=180) as r:
+                    blob = r.read()
+                print(">>> artifact 已下载（走签名 URL，未带 auth）: %d bytes"
+                      % len(blob))
+                break
+            except Exception as e:
+                print("   下载重试 %d: %r" % (attempt + 1, repr(e)[:120]))
+                time.sleep(5)
+        else:
+            print("!!! 下载 artifact 失败"); sys.exit(1)
     apks = []
     with zipfile.ZipFile(io.BytesIO(blob)) as z:
         for name in z.namelist():
