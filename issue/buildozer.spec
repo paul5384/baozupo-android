@@ -18,7 +18,7 @@ source.include_patterns = fonts/*,assets/*
 # CI 专用的 spec 自检脚本与测试文件，不必进包
 source.exclude_patterns = prespec.py,_test_*.py,shots/*,*.log
 
-version = 1.0
+version = 1.1
 
 requirements = hostpython3==3.11.9,python3==3.11.9,kivy
 

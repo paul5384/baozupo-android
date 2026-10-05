@@ -48,13 +48,17 @@ def _derive(pin, salt):
 
 
 def _keystream(pin, salt, n):
-    """用 PBKDF2 派生并扩展成 n 字节密钥流（sha256 级联，纯标准库）。"""
+    """用 PBKDF2 派生并扩展成 n 字节密钥流（sha256 级联，纯标准库）。
+
+    注意 counter 用 2 字节而不是 1 字节：bytes([256]) 会抛 ValueError，
+    1 字节版在需要 >255 轮（n > 8160 字节）时会崩。虽然当前私钥只用 32 字节，
+    但这是个等着被踩的雷。
+    """
+    base = _derive(pin, salt)
     ks = b""
-    block = b""
     counter = 0
     while len(ks) < n:
-        block = hashlib.sha256(_derive(pin, salt) + bytes([counter])).digest()
-        ks += block
+        ks += hashlib.sha256(base + counter.to_bytes(2, "big")).digest()
         counter += 1
     return ks[:n]
 

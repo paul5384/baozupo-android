@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-包租婆授权码发码器（作者专用）  v1.0
+包租婆授权码发码器（作者专用）  v1.1
 ================================================================================
 只装在作者自己手机上。客户手机上的《包租婆出租屋管家》只含公钥，
 私钥只在本 App 内，且经 PIN 加密后落盘。
@@ -24,6 +24,7 @@ import io
 import json
 import os
 import time
+import traceback
 
 from kivy.app import App
 from kivy.clock import Clock
@@ -43,7 +44,7 @@ import license_core as LC
 import vault as V
 
 APP_TITLE = "包租婆发码器"
-VERSION = "1.0"
+VERSION = "1.1"
 
 # 颜色（与主 App 同一套暖色系）
 C_BG = (0.16, 0.16, 0.18, 1)
@@ -60,18 +61,48 @@ FONT_PATH = os.path.join(BASE_DIR, "fonts", "simhei.ttf")
 HISTORY_FILE = "bzq_history.json"
 
 
+def _try_makedirs(p):
+    try:
+        os.makedirs(p, exist_ok=True)
+        return os.path.isdir(p) and os.access(p, os.W_OK)
+    except Exception:
+        return False
+
+
 def data_dir():
+    """应用私有目录。
+
+    真机闪退的修法：这里原来直接 `from android.storage import app_storage_path`，
+    任何一步失败（模块缺失 / pyjnius 未就绪 / 路径不可写）都会让 build() 抛异常，
+    表现为「点开就闪退」。现在按 主App 同样的方式做三层兜底：
+      ① android.storage.app_storage_path 且可写
+      ② expanduser("~")/.bzqissue 且可写
+      ③ 最后退到 app 私有目录下的 _localdata（buildozer 已建好）
+    任何一层都不抛异常。
+    """
+    cands = []
     if platform == "android":
-        from android.storage import app_storage_path
-        return app_storage_path()
-    return os.path.join(BASE_DIR, "_localdata")
+        try:
+            from android.storage import app_storage_path
+            cands.append(app_storage_path())
+        except Exception:
+            pass
+    cands.append(os.path.join(os.path.expanduser("~"), ".bzqissue"))
+    cands.append(os.path.join(BASE_DIR, "_localdata"))
+    for d in cands:
+        try:
+            if d and _try_makedirs(d):
+                return d
+        except Exception:
+            continue
+    # 全部失败：返回一个必然可写的临时目录，宁可功能异常也不要闪退
+    import tempfile
+    d = tempfile.mkdtemp(prefix="bzq_")
+    return d
 
 
 def ensure_dir():
-    d = data_dir()
-    if not os.path.exists(d):
-        os.makedirs(d)
-    return d
+    return data_dir()
 
 
 def now_str():
@@ -441,10 +472,83 @@ class IssueApp(App):
         self.priv = None
         self.dirty = False
 
+    # ------------------------------------------------------------------ 异常兜底
+    def handle_exception(self, inst, exc):
+        """Kivy 运行期异常兜底：写日志 + 剪贴板，绝不让 App 静默死掉。"""
+        try:
+            tb = "".join(traceback.format_exception(type(exc), exc,
+                                                     exc.__traceback__))
+            _err_log("运行期异常（Kivy 捕获）: %s\n%s" % (type(exc).__name__, tb))
+            try:
+                Clipboard.copy("【发码器错误】%s\n\n%s"
+                               % (type(exc).__name__, tb[:1200]))
+            except Exception:
+                pass
+        except Exception:
+            pass
+        return False
+
+
+def _err_log(text):
+    """把错误写到多个候选位置，全失败也无所谓（不能因日志再崩）。"""
+    for d in (lambda: data_dir(), lambda: os.path.join(BASE_DIR, "_localdata"),
+              lambda: os.path.expanduser("~")):
+        try:
+            p = d()
+            if not p:
+                continue
+            if not os.path.isdir(p):
+                os.makedirs(p, exist_ok=True)
+            with open(os.path.join(p, "error.log"), "a", encoding="utf-8") as f:
+                f.write("\n=== %s ===\n%s\n" % (now_str(), text))
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _show_crash(text):
+    """崩溃逃生界面：即使主程序起不来，也让错误看得见（可截图/复制）。"""
+    try:
+        from kivy.base import runTouchApp
+
+        try:
+            if FONT_PATH and os.path.exists(FONT_PATH):
+                LabelBase.register(name="CN", fn_regular=FONT_PATH)
+        except Exception:
+            pass
+
+        ti = TextInput(text=text[-5000:], readonly=True, font_size=sp(11),
+                       background_color=(0.1, 0.1, 0.12, 1),
+                       foreground_color=C_TEXT)
+        try:
+            ti.font_name = "CN"
+        except Exception:
+            pass
+        sv = ScrollView()
+        sv.add_widget(ti)
+        runTouchApp(sv)
+    except Exception:
+        # 连界面都起不来，至少把内容复制到剪贴板
+        try:
+            Clipboard.copy("【发码器崩溃】\n" + text[-1500:])
+        except Exception:
+            pass
+
 
 def main():
     IssueApp().run()
 
 
 if __name__ == "__main__":
-    main()
+    # 启动失败不要直接闪退：写日志 + 显示错误界面。
+    # 真机「点开就闪退」时，这一层是唯一能拿到原因的地方。
+    try:
+        main()
+    except BaseException as e:
+        _tb = traceback.format_exc()
+        _err_log("!!! 启动失败: %s" % _tb)
+        _show_crash(
+            "包租婆发码器 %s 启动失败\n\n%s\n\n"
+            "请截图此页面发给开发者。\n"
+            "（错误也已写入 error.log）" % (VERSION, _tb))
