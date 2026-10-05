@@ -1,4 +1,0 @@
-__init__.py  4112
-no-ast-str.patch  765
-sdl-gl-swapwindow-nogil.patch  1428
-use_cython.patch  432

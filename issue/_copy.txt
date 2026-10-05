@@ -1,5 +1,0 @@
-recipes: recipes\kivy\no-ast-str.patch (765)
-recipes: recipes\kivy\sdl-gl-swapwindow-nogil.patch (1428)
-recipes: recipes\kivy\use_cython.patch (432)
-recipes: recipes\kivy\__init__.py (4112)
-filetype exists in SRC (7 项)
