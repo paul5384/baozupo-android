@@ -29,7 +29,7 @@ source.include_patterns = fonts/*,assets/*,filetype/*,filetype/types/*
 # 原样塞进值里（'...*.log,\\\nbzq_probe.txt...'），exclude 规则直接失效。
 source.exclude_patterns = prespec.py,_depcheck.py,_test_*.py,_probe_test.py,shots/*,*.log,bzq_probe.txt,probe_*.txt,bzq_diag.txt,_kivy_src/*,_*.txt,cleansign.py,resign_local.py
 
-version = 1.3
+version = 1.4
 
 requirements = hostpython3==3.11.9,python3==3.11.9,kivy
 

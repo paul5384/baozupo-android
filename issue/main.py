@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-包租婆授权码发码器（作者专用）  v1.3
+包租婆授权码发码器（作者专用）  v1.4
 ================================================================================
 只装在作者自己手机上。客户手机上的《包租婆出租屋管家》只含公钥，
 私钥只在本 App 内，且经 PIN 加密后落盘。
@@ -43,7 +43,7 @@ import traceback
 #      （用 jnius 直调 Android API，不依赖 Kivy，Kivy 挂了也照样弹得出来）
 # ==============================================================================
 APP_TITLE = "包租婆发码器"
-VERSION = "1.3"
+VERSION = "1.4"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # 中文字体路径要等 kivy 就绪后再解析 —— 见下方 register_cjk_font()。
 # 那里用的是「覆盖 Roboto」的注册方式；早期版本写成硬编码单路径 + 注册成
@@ -663,8 +663,13 @@ class IssueApp(App):
         for h in self.history[:30]:
             dev = h.get("device", "")
             devs = "-".join([dev[:4], dev[4:]]) if len(dev) == 8 else dev
-            row = BoxLayout(orientation="vertical", size_hint_y=None, height=dp(58),
-                            padding=dp(8))
+            # 行高必须由内容决定，不能写死。
+            # 一行实际要放：设备码+时间(24) + 激活码(115 字符，会换行成 2~3 行) + 复制按钮(30)，
+            # 早先写死 height=dp(58) 装不下 —— BoxLayout 不会裁剪子控件，多出来的部分直接压到
+            # 下一行；第一行还往上压住了「② 发码历史」标题，真机上就是「文字重叠」。
+            row = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(4),
+                            padding=[dp(10), dp(6)])
+            row.bind(minimum_height=row.setter("height"))
             t1 = self._lbl("%s   %s" % (devs, h.get("at", "")), 12, C_TEXT, dp(24))
             t2 = self._lbl(h.get("code", ""), 10.5, C_MUTED, dp(26))
             row.add_widget(t1)

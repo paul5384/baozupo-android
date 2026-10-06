@@ -127,7 +127,7 @@ def push_via_api(pairs):
     os.environ["GH_BRANCH"] = BRANCH
     os.environ["GH_TOKEN_FILE"] = TOKEN_FILE
     os.environ["COMMIT_MSG"] = (
-        "v1.3 修复中文字体注册名未覆盖 Roboto 导致界面全为方框")
+        "v1.4 修复发码历史条目写死行高导致文字/按钮与相邻条重叠")
     import ghci
     return ghci.cmd_push(pairs)
 
@@ -264,7 +264,7 @@ def main():
         for name in z.namelist():
             if name.lower().endswith(".apk"):
                 dest = os.path.join(
-                    OUT_DIR, "包租婆授权码发码器-v1.3-arm64.apk")
+                    OUT_DIR, "包租婆授权码发码器-v1.4-arm64.apk")
                 with open(dest, "wb") as f:
                     f.write(z.read(name))
                 apks.append(dest)
