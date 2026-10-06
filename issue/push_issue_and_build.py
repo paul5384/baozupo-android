@@ -37,7 +37,11 @@ TMP = r"C:\Users\L540\Desktop\python\包租婆\_issue_push"
 OUT_DIR = r"C:\Users\L540\Desktop\python\包租婆"
 
 IGNORE_DIRS = {".git", "__pycache__", ".buildozer", "bin", ".signing",
-               "_kivy_src", "_localdata", "_exp"}
+               "_kivy_src", "_localdata", "_exp", ".github"}
+# 为什么不推 .github/：GitHub Actions 只认**仓库根**的 .github/workflows/，
+# 子目录 issue/.github/ 下那份永远不会被识别 —— 推上去只是造出一份
+# 「改了却从不生效」的副本（本次就在这上面绕了一大圈：CI 全绿、产物照出，
+# 但签名改动始终没落地）。workflow 的推送统一走 push_root_wf.py。
 # 这个仓库是 public：任何下划线开头的本机调试产物一律不推。
 # 之前只排除了 _test_/_repro_/_depcheck/_probe_，结果 _allverify.txt、
 # _sigchk.txt 之类带着本机路径和证书指纹的日志全被推上了公开仓库。
@@ -122,7 +126,8 @@ def push_via_api(pairs):
     os.environ["GH_REPO"] = "%s/%s" % (ME, REPO)
     os.environ["GH_BRANCH"] = BRANCH
     os.environ["GH_TOKEN_FILE"] = TOKEN_FILE
-    os.environ["COMMIT_MSG"] = "v1.2 修复 filetype 缺失导致的启动闪退"
+    os.environ["COMMIT_MSG"] = (
+        "v1.3 修复中文字体注册名未覆盖 Roboto 导致界面全为方框")
     import ghci
     return ghci.cmd_push(pairs)
 
@@ -148,23 +153,29 @@ def main():
         print("!!! PUSH FAILED"); sys.exit(1)
     print(">>> 推送完成（REST tree 原子提交）")
 
-    st, txt = api("POST",
-                  "/repos/%s/%s/actions/workflows/%s/dispatches" % (me, REPO, WORKFLOW),
-                  {"ref": BRANCH})
-    if st not in (204, 200):
-        print("DISPATCH FAILED", st, txt[:300]); sys.exit(1)
-    print(">>> 已触发构建")
+    # 这里**不再**额外 dispatch：workflow 里已有 on.push，推完自动跑一次。
+    # 之前 push + dispatch 各触发一次 -> 两个并发 run 同时构建同一分支，
+    # 白等一轮还容易取错产物。
+    st, txt = api("GET", "/repos/%s/%s/commits/%s" % (me, REPO, BRANCH))
+    pushed_sha = json.loads(txt).get("sha") if st == 200 else None
+    print(">>> 已推送 %s，等 push 触发的构建出现"
+          % ((pushed_sha or "?")[:8]))
 
     run_id = None
     for _ in range(30):
         time.sleep(8)
         st, txt = api("GET", "/repos/%s/%s/actions/runs?head_branch=%s"
-                      "&per_page=3" % (me, REPO, BRANCH))
+                      "&per_page=5" % (me, REPO, BRANCH))
         if st == 200:
             runs = json.loads(txt).get("workflow_runs", [])
-            if runs:
-                run_id = runs[0]["id"]
-                print(">>> run %s status=%s" % (run_id, runs[0]["status"]))
+            # 认准本次 push 的 sha：分支上可能还挂着上一轮遗留的 run
+            pick = [r for r in runs
+                    if not pushed_sha or r.get("head_sha") == pushed_sha]
+            if pick:
+                run_id = pick[0]["id"]
+                print(">>> run %s status=%s sha=%s"
+                      % (run_id, pick[0]["status"],
+                         (pick[0].get("head_sha") or "")[:8]))
                 break
     if not run_id:
         print("未找到 run"); sys.exit(1)
@@ -253,7 +264,7 @@ def main():
         for name in z.namelist():
             if name.lower().endswith(".apk"):
                 dest = os.path.join(
-                    OUT_DIR, "包租婆授权码发码器-v1.2-arm64.apk")
+                    OUT_DIR, "包租婆授权码发码器-v1.3-arm64.apk")
                 with open(dest, "wb") as f:
                     f.write(z.read(name))
                 apks.append(dest)

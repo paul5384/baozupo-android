@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-包租婆授权码发码器（作者专用）  v1.2
+包租婆授权码发码器（作者专用）  v1.3
 ================================================================================
 只装在作者自己手机上。客户手机上的《包租婆出租屋管家》只含公钥，
 私钥只在本 App 内，且经 PIN 加密后落盘。
@@ -43,9 +43,12 @@ import traceback
 #      （用 jnius 直调 Android API，不依赖 Kivy，Kivy 挂了也照样弹得出来）
 # ==============================================================================
 APP_TITLE = "包租婆发码器"
-VERSION = "1.2"
+VERSION = "1.3"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-FONT_PATH = os.path.join(BASE_DIR, "fonts", "simhei.ttf")
+# 中文字体路径要等 kivy 就绪后再解析 —— 见下方 register_cjk_font()。
+# 那里用的是「覆盖 Roboto」的注册方式；早期版本写成硬编码单路径 + 注册成
+# 自造名 "CN"，结果真机上中文全是方框（详见该函数上方注释）。
+FONT_PATH = None
 
 _STAGE = "S0 脚本开始执行"
 _LINES = []
@@ -257,6 +260,53 @@ _diag_step("S2 业务模块",
            "import vault as V")
 _diag_write("S3 全部 import 完成")
 
+
+# ==============================================================================
+# 【中文字体注册】必须排在 kivy 就绪之后、任何界面创建之前。
+#
+# 这就是 v1.2 真机截图里「中文全是方框」的根因：
+#   原来写的是 LabelBase.register(name="CN", fn_regular=FONT_PATH) ——
+#   它只是往 Kivy 里**新增**了一个叫 CN 的字体族，并没有替换默认的 Roboto。
+#   而所有 Kivy 控件的 font_name 默认值就是 "Roboto"，Roboto 不含汉字，
+#   于是凡是没显式写 font_name="CN" 的控件（也就是绝大多数）全渲染成豆腐块。
+#   主 App 一直显示正常，正是因为它注册的名字就是 "Roboto"（覆盖掉默认）。
+#
+# 所以这里与主 App 完全对齐，三点缺一不可：
+#   ① 注册名用 "Roboto"（覆盖默认），而不是自造一个新名字
+#   ② 多候选路径（内置字体 → 安卓系统字体 → Windows），任一可用即可
+#   ③ 四个字重一起注册：只给 fn_regular 的话，任何控件一旦设了 bold=True，
+#      Kivy 会去找 Roboto-Bold、找不到就退回不含汉字的默认字体，又是方框
+# ==============================================================================
+def register_cjk_font():
+    """按 内置字体 → 安卓系统字体 → Windows 字体 找一个能显示中文的字体。
+
+    返回实际使用的路径；全都不可用时返回 None（界面会是方框，但不会崩）。
+    """
+    candidates = [
+        os.path.join(BASE_DIR, "fonts", "simhei.ttf"),
+        os.path.join(BASE_DIR, "fonts", "DroidSansFallback.ttf"),
+        "/system/fonts/DroidSansFallback.ttf",
+        "/system/fonts/NotoSansCJK-Regular.ttc",
+        "/system/fonts/DroidSansChinese.ttf",
+        "/system/fonts/NotoSansSC-Regular.otf",
+        "C:/Windows/Fonts/simhei.ttf",
+        "C:/Windows/Fonts/msyh.ttc",
+    ]
+    for path in candidates:
+        try:
+            if os.path.exists(path):
+                LabelBase.register(name="Roboto", fn_regular=path,
+                                   fn_bold=path, fn_italic=path,
+                                   fn_bolditalic=path)
+                return path
+        except Exception:
+            continue
+    return None
+
+
+FONT_PATH = register_cjk_font()
+_diag_write("S3.1 中文字体已注册: %s" % (FONT_PATH or "未找到（界面会是方框）"))
+
 # 颜色（与主 App 同一套暖色系）
 C_BG = (0.16, 0.16, 0.18, 1)
 C_CARD = (0.22, 0.22, 0.25, 1)
@@ -412,13 +462,14 @@ class IssueApp(App):
         # 分步打点：真机闪退时靠 lines 判断崩在哪一步
         _diag_write(">> B1 build() entered")
         try:
-            if FONT_PATH and os.path.exists(FONT_PATH):
-                _diag_write("     B2 字体存在 size=%d"
+            # 字体已在模块加载阶段注册（见 register_cjk_font，注册名覆盖 Roboto）。
+            # 这里只做确认并留日志 —— 字体缺失属于「界面只有方框、但不会崩」的
+            # 静默故障，不在启动日志里写明，真机上根本看不出是它导致的。
+            if FONT_PATH:
+                _diag_write("     B2 字体就绪 size=%d"
                             % os.path.getsize(FONT_PATH))
-                LabelBase.register(name="CN", fn_regular=FONT_PATH)
-                _diag_write("     B3 字体注册完成")
             else:
-                _diag_write("     B2 字体缺失 %r" % (FONT_PATH,))
+                _diag_write("     B2 !! 无中文字体，界面将显示为方框")
             self.load_history()
             _diag_write("     B4 历史载入 %d 条" % len(self.history))
             d = ensure_dir()
@@ -761,17 +812,22 @@ def _show_crash(text):
     try:
         from kivy.base import runTouchApp
 
+        # 崩溃页也得能看中文：同样按 Roboto 注册（名字对不上就还是方框）。
         try:
             if FONT_PATH and os.path.exists(FONT_PATH):
-                LabelBase.register(name="CN", fn_regular=FONT_PATH)
+                LabelBase.register(name="Roboto", fn_regular=FONT_PATH,
+                                   fn_bold=FONT_PATH, fn_italic=FONT_PATH,
+                                   fn_bolditalic=FONT_PATH)
         except Exception:
             pass
 
         ti = TextInput(text=text[-5000:], readonly=True, font_size=sp(11),
                        background_color=(0.1, 0.1, 0.12, 1),
                        foreground_color=C_TEXT)
+        # 默认 font_name 就是注册过的 Roboto，这里仍显式写一遍：
+        # 将来若有人改了注册名，这行会立刻暴露出「崩溃页中文又变方框」。
         try:
-            ti.font_name = "CN"
+            ti.font_name = "Roboto"
         except Exception:
             pass
         sv = ScrollView()
