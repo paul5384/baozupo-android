@@ -20,32 +20,17 @@ jobs:
       - name: 拉取代码
         uses: actions/checkout@v4
 
-      # ==== 签名 keystore ====
-      # buildozer debug 出来的 APK 是【未签名】的，手机会直接拒绝安装。
-      # keystore 不能提交进公开仓库，所以用 Actions cache 持久化：
-      #   首次 keytool 生成 → post 阶段存入 cache → 之后每次 restore 同一份证书，
-      #   这样各版本签名一致，用户可以覆盖升级而不用卸载重装。
-      - name: 恢复签名 keystore
-        uses: actions/cache@v4
-        with:
-          path: .signing
-          key: baozupo-signing-keystore-v1
-
-      - name: 若无则生成 keystore
-        run: |
-          set -e
-          mkdir -p .signing
-          if [ ! -f .signing/app.keystore ]; then
-            echo "首次运行：生成 keystore"
-            keytool -genkeypair -v -keystore .signing/app.keystore -storetype PKCS12 \
-              -storepass baozupo2026 -keypass baozupo2026 -alias baozupo \
-              -keyalg RSA -keysize 2048 -validity 18250 \
-              -dname "CN=Baozupo App, OU=Rental, O=Baozupo, L=Guangzhou, ST=GD, C=CN"
-          else
-            echo "复用已缓存 keystore"
-          fi
-          keytool -list -v -keystore .signing/app.keystore -storepass baozupo2026 \
-            -alias baozupo | grep -E 'SHA1:|SHA256:' || true
+      # ==== 签名策略：CI 不签名，签名在本地做 ====
+      # 历史教训（2026-10-08，用户装机报「缺少证书」）：
+      #   1) 早前把 keystore 放在 actions/cache 里。仓库缓存总量涨到 ~10.4GB 超过
+      #      GitHub 的 10GB 上限，keystore 那条缓存被 LRU 淘汰 → CI 静默重新生成了
+      #      一把新密钥 → 用户手机上旧版证书对不上，新包直接装不上。
+      #   2) 想改用仓库 Secret 恢复，实测本仓库的 workflow 只要出现 secrets 上下文
+      #      （不管写在 run 里还是 env 里）就会被判 startup_failure，整条流水线起不来。
+      # 现在改为：CI 只负责编译 + 产出【未签名】包，签名统一在本机用
+      #   baozupo.keystore（CN=Baozupo App，SHA-256 B2CC86AB…）执行：
+      #   python sign_local.py <未签名.apk> <输出.apk>
+      # 好处：私钥永不进云端、永不被缓存淘汰，签名结果可复现且带指纹硬断言。
 
       - name: 缓存 buildozer 环境（首次约 40 分钟，之后 5 分钟左右）
         uses: actions/cache@v4
@@ -250,58 +235,34 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: zipalign + 签名（只签 v2+v3，不留 v1 残留）
+      - name: zipalign（只对齐，不签名）
         run: |
+          # 本步骤只做 4 字节对齐，产出【未签名】包。
+          # 签名一律在本机执行（python sign_local.py），原因见文件顶部「签名策略」注释：
+          #   私钥不进云端，避免 cache/Secret 带来的密钥漂移，签名结果可复现并带指纹硬断言。
           set +e
           ZIPALIGN=$(find /github/home /root /opt /usr/local -maxdepth 8 -type f -name zipalign \
                      -path '*/build-tools/*' 2>/dev/null | sort | tail -1)
           echo "zipalign -> [$ZIPALIGN]"
           if [ -z "$ZIPALIGN" ]; then
-            echo "::error::找不到 zipalign/apksigner，未签名的包不能交给用户"
+            echo "::error::找不到 zipalign，无法对齐产出"
             exit 1
           fi
-          BT=$(dirname "$ZIPALIGN")
-          # 约定的签名证书指纹（CN=Baozupo App，对应本机 baozupo.keystore）。
-          # 对不上说明密钥被换过 → 用户装机时证书冲突，必须直接失败。
-          EXPECT_CERT="b2cc86ab73225363e7a2dfca1817e339062ad2380532627a30ac7cb05ff8bdfe"
-          FAIL=0
           for a in bin/*.apk; do
             b=$(basename "$a" .apk)
-            "$BT/zipalign" -p -f 4 "$a" "${b}_al.apk" || { echo "::error::zipalign 失败"; FAIL=1; continue; }
-            # --v1-signing-enabled false：不只是「不写 v1」，还会把 buildozer 留下的
-            # v1 签名文件（BAOZUPO.SF/.RSA/MANIFEST.MF）一起删掉。
-            # 那些文件带 X-Android-APK-Signed: 2, 3，国产 ROM 的安装器读到就报
-            # 「缺少证书 / 没有任何证书」—— 本项目已踩过两次（发码器、包租婆）。
-            if [ -f "$BT/apksigner" ]; then
-              "$BT/apksigner" sign --ks .signing/app.keystore --ks-pass pass:baozupo2026 \
-                --key-pass pass:baozupo2026 --ks-key-alias baozupo \
-                --v1-signing-enabled false --v2-signing-enabled true --v3-signing-enabled true \
-                --out "${b}_sg.apk" "${b}_al.apk"
-              "$BT/apksigner" verify -v --print-certs "${b}_sg.apk" > "${b}_verify.txt" 2>&1
-            else
-              java -cp "$BT/lib/apksigner.jar" com.android.apksigner.ApkSignerTool sign \
-                --ks .signing/app.keystore --ks-pass pass:baozupo2026 \
-                --key-pass pass:baozupo2026 --ks-key-alias baozupo \
-                --v1-signing-enabled false --v2-signing-enabled true --v3-signing-enabled true \
-                --out "${b}_sg.apk" "${b}_al.apk"
-              java -cp "$BT/lib/apksigner.jar" com.android.apksigner.ApkSignerTool verify -v --print-certs "${b}_sg.apk" > "${b}_verify.txt" 2>&1
-            fi
-            cat "${b}_verify.txt"
-            grep -q "$EXPECT_CERT" "${b}_verify.txt" || { echo "::error::证书指纹不是约定那把，拒绝出包"; FAIL=1; continue; }
-            grep -q "Verified using v2 scheme (APK Signature Scheme v2): true" "${b}_verify.txt" || { echo "::error::v2 未签上"; FAIL=1; continue; }
-            grep -q "Verified using v3 scheme (APK Signature Scheme v3): true" "${b}_verify.txt" || { echo "::error::v3 未签上"; FAIL=1; continue; }
-            if python3 -c "import sys,zipfile;z=zipfile.ZipFile('${b}_sg.apk');L=[n for n in z.namelist() if n.startswith('META-INF/') and n.endswith(('.SF','.RSA','.DSA','.EC','MANIFEST.MF'))];print('META-INF v1 leftover:',L);sys.exit(1 if L else 0)"; then :; else echo "::error::仍有 v1 残留，真机可能报「缺少证书」"; FAIL=1; continue; fi
-            mv -f "${b}_sg.apk" "$a"
-            rm -f "${b}_al.apk"
+            "$ZIPALIGN" -p -f 4 "$a" "${b}_al.apk" || { echo "::error::zipalign 失败"; exit 1; }
+            mv -f "${b}_al.apk" "$a"
+            echo "已对齐: $a"
           done
-          echo "--- 签名后 ---"
+          # 明确标注这是未签名包：buildozer debug 产物自带一把临时 debug 签名，
+          # 这里不删除它，仅提示本机重签时会用 --v1-signing-enabled false 一并替换/清理。
+          echo "--- 待签名产物（本机 sign_local.py 处理） ---"
           ls -lh bin/
-          if [ "$FAIL" != "0" ]; then echo "::error::签名环节有包未通过断言"; exit 1; fi
 
-      - name: 上传 APK（在页面底部 Artifacts 里下载）
+      - name: 上传未签名 APK（在页面底部 Artifacts 里下载，需本机再签名）
         uses: actions/upload-artifact@v4
         with:
-          name: baozupo-apk
+          name: baozupo-apk-unsigned
           path: bin/*.apk
           if-no-files-found: error
           retention-days: 30
