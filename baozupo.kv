@@ -14,6 +14,13 @@
 #:set C_DANGER (0.753, 0.314, 0.302, 1)
 #:set C_INFO (0.243, 0.420, 0.478, 1)
 
+# ============================== 弹窗统一样式 ==============================
+# Kivy 的 ModalView 默认 overlay_color = (0,0,0,0.7)：70% 黑遮罩会把整屏压暗，
+# 弹窗里的浅色文字就更看不见了。这里统一减淡到 45%。
+<Popup>:
+    overlay_color: 0, 0, 0, 0.45
+
+
 <Root>:
     orientation: 'vertical'
     canvas.before:
@@ -221,12 +228,14 @@
                     pos: self.pos
                     size: self.size
             Label:
+                id: title
                 text: '实时统计'
                 font_size: sp(16)
                 color: (1, 1, 1, 1)
                 halign: 'left'
                 valign: 'middle'
                 text_size: self.size
+                shorten: True
             Label:
                 text: '包租婆 · 出租屋管家'
                 font_size: sp(11)
@@ -252,36 +261,70 @@
         orientation: 'vertical'
         BoxLayout:
             size_hint_y: None
-            height: dp(58)
+            height: dp(104)
+            orientation: 'vertical'
             padding: dp(8), dp(6)
             spacing: dp(6)
-            TextInput:
-                id: search
-                hint_text: '搜房间号 / 地址 / 租客'
-                multiline: False
-                font_size: sp(13)
-                background_color: (1, 1, 1, 1)
-                foreground_color: C_TEXT
-                cursor_color: C_ACCENT
-                padding: dp(10), dp(12), dp(10), dp(12)
-                on_text_validate: app.refresh_houses()
-            Spinner:
-                id: filt
-                text: '全部'
-                values: ['全部', '已租', '空闲']
-                size_hint_x: None
-                width: dp(80)
-                font_size: sp(13)
-                color: C_TEXT
-                on_text: app.on_filter_change(self, self.text)
-            Button:
-                text: '＋新增'
-                size_hint_x: None
-                width: dp(72)
-                font_size: sp(13)
-                background_color: C_ACCENT
-                color: (1, 1, 1, 1)
-                on_release: app.open_house_form('add')
+            BoxLayout:
+                size_hint_y: None
+                height: dp(44)
+                spacing: dp(6)
+                TextInput:
+                    id: search
+                    hint_text: '搜房间号 / 地址 / 租客（空格分多词）'
+                    multiline: False
+                    font_size: sp(13)
+                    background_color: (1, 1, 1, 1)
+                    foreground_color: C_TEXT
+                    cursor_color: C_ACCENT
+                    padding: dp(10), dp(12), dp(10), dp(12)
+                    # 原来只有按回车（on_text_validate）才过滤，用户以为搜索坏了
+                    on_text: app.on_search_change(self.text)
+                Button:
+                    text: '搜索'
+                    size_hint_x: None
+                    width: dp(56)
+                    font_size: sp(13)
+                    background_color: C_ACCENT
+                    color: (1, 1, 1, 1)
+                    on_release: app.search_from_input()
+                Button:
+                    text: '清空'
+                    size_hint_x: None
+                    width: dp(52)
+                    font_size: sp(13)
+                    background_color: C_INFO
+                    color: (1, 1, 1, 1)
+                    on_release: app.clear_search()
+            BoxLayout:
+                size_hint_y: None
+                height: dp(42)
+                spacing: dp(6)
+                Spinner:
+                    id: filt
+                    text: '全部'
+                    values: ['全部', '已租', '空闲']
+                    size_hint_x: None
+                    width: dp(88)
+                    font_size: sp(13)
+                    color: C_TEXT
+                    on_text: app.on_filter_change(self, self.text)
+                Label:
+                    text: '双击卡片看详情'
+                    font_size: sp(11)
+                    color: C_MUTED
+                    halign: 'left'
+                    valign: 'middle'
+                    text_size: self.size
+                    shorten: True
+                Button:
+                    text: '＋新增'
+                    size_hint_x: None
+                    width: dp(72)
+                    font_size: sp(13)
+                    background_color: C_ACCENT
+                    color: (1, 1, 1, 1)
+                    on_release: app.open_house_form('add')
         Label:
             id: count
             text: ''
@@ -297,7 +340,7 @@
             id: rv
             viewclass: 'HouseCard'
             RecycleBoxLayout:
-                default_size: None, dp(142)
+                default_size: None, dp(162)
                 default_size_hint: 1, None
                 size_hint_y: None
                 height: self.minimum_height
@@ -309,7 +352,7 @@
 <HouseCard>:
     orientation: 'vertical'
     size_hint_y: None
-    height: dp(142)
+    height: dp(162)
     padding: dp(10)
     spacing: dp(2)
     canvas.before:
@@ -336,6 +379,7 @@
             halign: 'left'
             valign: 'middle'
             text_size: self.size
+            shorten: True
         Label:
             text: root.status
             font_size: sp(12)
@@ -361,6 +405,7 @@
         halign: 'left'
         valign: 'middle'
         text_size: self.size
+        shorten: True
     Label:
         text: root.line2
         font_size: sp(12)
@@ -370,6 +415,7 @@
         halign: 'left'
         valign: 'middle'
         text_size: self.size
+        shorten: True
     Label:
         text: root.line3
         font_size: sp(11)
@@ -379,6 +425,17 @@
         halign: 'left'
         valign: 'middle'
         text_size: self.size
+        shorten: True
+    Label:
+        text: root.line4
+        font_size: sp(11)
+        color: C_MUTED
+        size_hint_y: None
+        height: dp(18)
+        halign: 'left'
+        valign: 'middle'
+        text_size: self.size
+        shorten: True
     BoxLayout:
         size_hint_y: None
         height: dp(34)
@@ -394,13 +451,21 @@
             font_size: sp(12)
             background_color: C_INFO
             color: (1, 1, 1, 1)
+            disabled: not root.has_tenant
             on_release: app.house_action('pay', root.room)
         Button:
             text: '水电'
             font_size: sp(12)
             background_color: 0.541, 0.427, 0.231, 1
             color: (1, 1, 1, 1)
+            disabled: not root.has_tenant
             on_release: app.house_action('util', root.room)
+        Button:
+            text: '抄表'
+            font_size: sp(12)
+            background_color: 0.243, 0.420, 0.478, 1
+            color: (1, 1, 1, 1)
+            on_release: app.house_action('meter', root.room)
         Button:
             text: '更多'
             font_size: sp(12)
@@ -430,22 +495,33 @@
                 Rectangle:
                     pos: self.pos
                     size: self.size
-        Label:
-            id: count
-            text: ''
-            font_size: sp(11)
-            color: C_MUTED
+        BoxLayout:
             size_hint_y: None
-            height: dp(24)
+            height: dp(36)
             padding: dp(12), 0
-            halign: 'left'
-            valign: 'middle'
-            text_size: self.size
+            spacing: dp(8)
+            Label:
+                id: count
+                text: ''
+                font_size: sp(11)
+                color: C_MUTED
+                halign: 'left'
+                valign: 'middle'
+                text_size: self.size
+                shorten: True
+            Button:
+                text: '导出名单'
+                font_size: sp(12)
+                size_hint_x: None
+                width: dp(88)
+                background_color: C_ACCENT
+                color: (1, 1, 1, 1)
+                on_release: app.export_tenants_csv()
         RecycleView:
             id: rv
             viewclass: 'TenantCard'
             RecycleBoxLayout:
-                default_size: None, dp(96)
+                default_size: None, dp(118)
                 default_size_hint: 1, None
                 size_hint_y: None
                 height: self.minimum_height
@@ -457,7 +533,7 @@
 <TenantCard>:
     orientation: 'vertical'
     size_hint_y: None
-    height: dp(96)
+    height: dp(156)
     padding: dp(10)
     spacing: dp(2)
     canvas.before:
@@ -484,6 +560,7 @@
             halign: 'left'
             valign: 'middle'
             text_size: self.size
+            shorten: True
         Label:
             text: root.room
             font_size: sp(13)
@@ -493,6 +570,7 @@
             halign: 'right'
             valign: 'middle'
             text_size: self.size
+            shorten: True
         Label:
             text: root.tag
             font_size: sp(12)
@@ -518,6 +596,7 @@
         halign: 'left'
         valign: 'middle'
         text_size: self.size
+        shorten: True
     Label:
         text: root.line2
         font_size: sp(11)
@@ -527,6 +606,40 @@
         halign: 'left'
         valign: 'middle'
         text_size: self.size
+        shorten: True
+    Label:
+        text: root.line3
+        font_size: sp(11)
+        color: C_MUTED
+        size_hint_y: None
+        height: dp(20)
+        halign: 'left'
+        valign: 'middle'
+        text_size: self.size
+        shorten: True
+    BoxLayout:
+        size_hint_y: None
+        height: dp(34)
+        spacing: dp(5)
+        Button:
+            text: '拨打'
+            font_size: sp(12)
+            background_color: C_INFO
+            color: (1, 1, 1, 1)
+            disabled: root.tel == ''
+            on_release: app.dial_tel(root.tel)
+        Button:
+            text: '同住人'
+            font_size: sp(12)
+            background_color: C_ACCENT
+            color: (1, 1, 1, 1)
+            on_release: app.open_room_tenants(root.room)
+        Button:
+            text: '缴费码'
+            font_size: sp(12)
+            background_color: 0.541, 0.427, 0.231, 1
+            color: (1, 1, 1, 1)
+            on_release: app.open_bill_qr(root.room)
 
 
 # ============================== 我的 ==============================
@@ -561,6 +674,17 @@
             halign: 'left'
             valign: 'middle'
             text_size: self.size
+        Label:
+            id: license
+            text: ''
+            font_size: sp(11)
+            color: C_MUTED
+            size_hint_y: None
+            height: dp(44)
+            padding: dp(12), 0
+            halign: 'left'
+            valign: 'middle'
+            text_size: self.width - dp(24), self.height
         BoxLayout:
             size_hint_y: None
             height: dp(40)
@@ -589,6 +713,23 @@
                 height: self.minimum_height
                 padding: dp(12)
                 spacing: dp(8)
+                Button:
+                    id: btn_support
+                    text: '★ 升级付费版 / 支持作者'
+                    size_hint_y: None
+                    height: dp(48)
+                    font_size: sp(15)
+                    background_color: 0.851, 0.643, 0.255, 1
+                    color: (1, 1, 1, 1)
+                    on_release: app.open_support()
+                Button:
+                    text: '联系作者（微信名片）'
+                    size_hint_y: None
+                    height: dp(48)
+                    font_size: sp(15)
+                    background_color: C_INFO
+                    color: (1, 1, 1, 1)
+                    on_release: app.open_contact()
                 Button:
                     text: '导出备份 / 导入数据'
                     size_hint_y: None

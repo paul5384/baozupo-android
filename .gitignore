@@ -8,8 +8,15 @@ __pycache__/
 # 开发用日志/截图（不入库）
 run.log
 shot.log
-shot_*.png
-_preview_shot.py
+shot*.png
+_preview_shot*.py
+_*.txt
+_*.log
+_dbg_*.py
+_diag_*.py
+_stage_*.py
+_test_*.py
+main_backup_*.py
 
 # 系统
 .DS_Store

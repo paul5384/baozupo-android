@@ -20,15 +20,145 @@ jobs:
       - name: 拉取代码
         uses: actions/checkout@v4
 
+      # ==== 签名 keystore ====
+      # buildozer debug 出来的 APK 是【未签名】的，手机会直接拒绝安装。
+      # keystore 不能提交进公开仓库，所以用 Actions cache 持久化：
+      #   首次 keytool 生成 → post 阶段存入 cache → 之后每次 restore 同一份证书，
+      #   这样各版本签名一致，用户可以覆盖升级而不用卸载重装。
+      - name: 恢复签名 keystore
+        uses: actions/cache@v4
+        with:
+          path: .signing
+          key: baozupo-signing-keystore-v1
+
+      - name: 若无则生成 keystore
+        run: |
+          set -e
+          mkdir -p .signing
+          if [ ! -f .signing/app.keystore ]; then
+            echo "首次运行：生成 keystore"
+            keytool -genkeypair -v -keystore .signing/app.keystore -storetype PKCS12 \
+              -storepass baozupo2026 -keypass baozupo2026 -alias baozupo \
+              -keyalg RSA -keysize 2048 -validity 18250 \
+              -dname "CN=Baozupo App, OU=Rental, O=Baozupo, L=Guangzhou, ST=GD, C=CN"
+          else
+            echo "复用已缓存 keystore"
+          fi
+          keytool -list -v -keystore .signing/app.keystore -storepass baozupo2026 \
+            -alias baozupo | grep -E 'SHA1:|SHA256:' || true
+
       - name: 缓存 buildozer 环境（首次约 40 分钟，之后 5 分钟左右）
         uses: actions/cache@v4
         with:
+          # 容器内 HOME 被 GH Actions 覆盖成 /github/home，写 /root/.buildozer 是错的
+          # （曾导致缓存永不命中，每轮都从零重编 ~40 分钟）
           path: |
+            /github/home/.buildozer
+            /github/home/.gradle
             /root/.buildozer
             /root/.gradle
+            .buildozer
           key: buildozer-container-${{ hashFiles('buildozer.spec') }}
           restore-keys: |
             buildozer-container-
+
+      - name: 注入 16KB 页对齐（Android 15+ 的 16KB 页设备必需）
+        run: |
+          python3 - <<'PY'
+          import os, re, glob
+          FLAG = '-Wl,-z,max-page-size=16384'
+
+          import subprocess, shutil, sys
+
+          def find_p4a():
+              # 1) 当前解释器直接导入
+              try:
+                  import pythonforandroid as p4a
+                  return os.path.dirname(p4a.__file__)
+              except Exception as e:
+                  print('import failed:', e)
+              # 1.5) buildozer 装在 venv 里，p4a 也在那（容器 python3 不是它）
+              for sp in sorted(glob.glob('/home/user/.venv/lib/python3.*/site-packages'),
+                               reverse=True):
+                  cand = os.path.join(sp, 'pythonforandroid')
+                  if os.path.isdir(cand):
+                      print('found via venv site-packages:', cand)
+                      return cand
+              # 2) 全盘搜
+              for pat in ['python-for-android', 'pythonforandroid']:
+                  try:
+                      out = subprocess.run(
+                          ['bash', '-lc',
+                           'find / -name "archs.py" -path "*%s*" 2>/dev/null | head -5' % pat],
+                          capture_output=True, text=True, timeout=180).stdout.split()
+                      print('find[%s] ->' % pat, out)
+                      if out:
+                          return os.path.dirname(out[0])
+                  except Exception as e:
+                      print('find failed:', e)
+              print('=== 环境探测 ===')
+              print('HOME=', os.environ.get('HOME'), 'USER=', os.environ.get('USER'))
+              for d in ['/root/.buildozer/android/platform', '/home/user/.buildozer/android/platform',
+                        '/root', '/home/user']:
+                  try:
+                      print(d, '->', os.listdir(d)[:40])
+                  except Exception as e:
+                      print(d, 'ERR', e)
+              # 3) 从 buildozer 可执行文件的 shebang 反查解释器
+              bz = shutil.which('buildozer')
+              print('buildozer at:', bz)
+              if bz:
+                  try:
+                      with open(bz) as f:
+                          py = f.readline().strip().lstrip('#!').strip()
+                      print('shebang:', py)
+                      out = subprocess.run(
+                          [py, '-c', 'import pythonforandroid,os;print(os.path.dirname(pythonforandroid.__file__))'],
+                          capture_output=True, text=True, timeout=60).stdout.strip()
+                      if out:
+                          return out
+                  except Exception as e:
+                      print('shebang route failed:', e)
+              return None
+
+          base = find_p4a()
+          print('p4a base:', base)
+          if not base or not os.path.isdir(base):
+              # p4a 是 buildozer 运行时才下载到 ~/.buildozer 的，冷缓存时不存在。
+              # 此时跳过注入（本轮仍是 4KB），等缓存热了下一轮再生效，不要阻塞构建。
+              print('!! 未找到 pythonforandroid，跳过 16KB 注入（不影响本轮打包）')
+              raise SystemExit(0)
+
+          # 1) 全局 LDFLAGS（autoconf/make 系 recipe 走这里）
+          ap = os.path.join(base, 'archs.py')
+          s = open(ap).read()
+          hits = []
+          def repl(m):
+              hits.append(m.group(0))
+              return m.group(0)[:-1] + ", '%s']" % FLAG
+          s2 = re.sub(r"common_ldflags\s*=\s*\[[^\]]*\]", repl, s)
+          if hits and FLAG not in s:
+              open(ap, 'w').write(s2)
+          print('archs.py common_ldflags patched:', len(hits), hits[:1])
+
+          # 2) ndk-build 系（SDL2 / bootstrap 的 libmain.so 走这里）
+          n = 0
+          for mk in glob.glob(os.path.join(base, '**', 'Application.mk'), recursive=True):
+              try:
+                  t = open(mk).read()
+                  if FLAG not in t:
+                      with open(mk, 'a') as f:
+                          f.write('\nAPP_LDFLAGS += %s\n' % FLAG)
+                      n += 1
+              except Exception as e:
+                  print('skip', mk, e)
+          print('Application.mk patched:', n)
+          PY
+          # 3) 新参数必须重编才生效：清掉已编译产物（保留 SDK/NDK 免重下）
+          # p4a 的 storage-dir 是 <工程>/.buildozer/android/platform/build-<arch>，
+          # 不在 $HOME 下（这也是之前 rm 了个寂寞、缓存也没存到产物的原因）
+          rm -rf .buildozer/android/platform/build .buildozer/android/platform/build-*
+          echo "已清除 p4a 构建产物（.buildozer/android/platform/build*），本轮重编"
 
       - name: 开始打包
         run: |
@@ -42,15 +172,118 @@ jobs:
           open(p,'w',encoding='utf-8').write(s)
           print('已清除本地路径行，使用容器内置 SDK/NDK')
           PY
-          yes | buildozer -v android debug
+          echo "--- 生效的 NDK / API 配置 ---"
+          grep -E '^android\.(ndk|api|minapi|archs)' buildozer.spec || true
+          ls -d /github/home/.buildozer/android/platform/android-ndk-* 2>/dev/null || true
+          # 判定成败不看退出码（yes 会被 SIGPIPE 杀成 141，PIPESTATUS 取值也不可靠），
+          # 直接以 bin 下是否产出 APK 为准
+          set +o pipefail
+          set +e
+          yes | buildozer -v android debug 2>&1 | tee build.log
+          echo "--- bin 目录内容 ---"
+          ls -lh bin/ 2>&1 | tail -n 20
+          if ! ls bin/*.apk >/dev/null 2>&1; then
+            echo "::error::no APK produced in bin/"
+            exit 1
+          fi
+          echo "APK 已生成，打包成功"
+
+      - name: 提取失败日志（小文件，便于传回本地）
+        if: failure()
+        run: |
+          tail -n 400 build.log > fail_tail.txt || true
+          grep -n -i -E "error|exception|traceback|failed|cannot find" build.log \
+            | grep -v -E "Werror|gcc -c|_validate_pyproject" | head -n 60 > fail_hits.txt || true
+          ls -l fail_tail.txt fail_hits.txt || true
+
+      - name: 上传失败日志（ASCII 名，避免编码问题）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fail-log
+          path: |
+            fail_tail.txt
+            fail_hits.txt
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: 显示产物
         run: ls -lh bin/ || true
 
+      - name: 校验 .so 页对齐（应全部为 0x4000）
+        run: |
+          python3 - <<'PY' | tee align_report.txt
+          import zipfile, struct, glob
+          ok = bad = 0
+          for apk in glob.glob('bin/*.apk'):
+              z = zipfile.ZipFile(apk)
+              print('==', apk)
+              for n in z.namelist():
+                  if not n.endswith('.so'):
+                      continue
+                  b = z.read(n)
+                  if b[:4] != b'\x7fELF':
+                      print('  %-42s (not ELF)' % n)
+                      continue
+                  phoff = struct.unpack_from('<Q', b, 0x20)[0]
+                  phentsize = struct.unpack_from('<H', b, 0x36)[0]
+                  phnum = struct.unpack_from('<H', b, 0x38)[0]
+                  al = []
+                  for i in range(phnum):
+                      off = phoff + i * phentsize
+                      if struct.unpack_from('<I', b, off)[0] == 1:
+                          al.append(struct.unpack_from('<Q', b, off + 0x30)[0])
+                  m = max(al) if al else 0
+                  good = m >= 0x4000
+                  ok += good
+                  bad += (not good)
+                  print('  %-42s %-8s %s' % (n, hex(m), '16KB OK' if good else '*** 4KB ***'))
+          print('SUMMARY 16KB_ok=%d still_4KB=%d' % (ok, bad))
+          PY
+
+      - name: 上传对齐校验报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: align-report
+          path: align_report.txt
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: zipalign + 签名（否则手机报「未签名，无法安装」）
+        run: |
+          set +e
+          ZIPALIGN=$(find /github/home /root /opt /usr/local -maxdepth 8 -type f -name zipalign \
+                     -path '*/build-tools/*' 2>/dev/null | sort | tail -1)
+          echo "zipalign -> [$ZIPALIGN]"
+          if [ -z "$ZIPALIGN" ]; then
+            echo "::warning::找不到 zipalign/apksigner，本轮 APK 仍未签名"
+          else
+            BT=$(dirname "$ZIPALIGN")
+            for a in bin/*.apk; do
+              b=$(basename "$a" .apk)
+              "$BT/zipalign" -p -f 4 "$a" "${b}_al.apk"
+              if [ -f "$BT/apksigner" ]; then
+                "$BT/apksigner" sign --ks .signing/app.keystore --ks-pass pass:baozupo2026 \
+                  --key-pass pass:baozupo2026 --ks-key-alias baozupo --out "${b}_sg.apk" "${b}_al.apk"
+                "$BT/apksigner" verify --print-certs "${b}_sg.apk"
+              else
+                java -cp "$BT/lib/apksigner.jar" com.android.apksigner.ApkSignerTool sign \
+                  --ks .signing/app.keystore --ks-pass pass:baozupo2026 \
+                  --key-pass pass:baozupo2026 --ks-key-alias baozupo --out "${b}_sg.apk" "${b}_al.apk"
+                java -cp "$BT/lib/apksigner.jar" com.android.apksigner.ApkSignerTool verify --print-certs "${b}_sg.apk"
+              fi
+              mv -f "${b}_sg.apk" "$a"
+              rm -f "${b}_al.apk"
+            done
+            echo "--- 签名后 ---"
+            ls -lh bin/
+          fi
+
       - name: 上传 APK（在页面底部 Artifacts 里下载）
         uses: actions/upload-artifact@v4
         with:
-          name: 包租婆APK
+          name: baozupo-apk
           path: bin/*.apk
           if-no-files-found: error
           retention-days: 30

@@ -13,41 +13,370 @@
 """
 
 import os
+import re
 import sys
+import time
 import json
+import io
+import random
+import hashlib
 import traceback
 from datetime import datetime, timedelta
 
-from kivy.app import App
-from kivy.lang import Builder
-from kivy.metrics import dp, sp
-from kivy.clock import Clock
-from kivy.utils import platform
-from kivy.core.text import LabelBase
-from kivy.core.clipboard import Clipboard
-from kivy.core.window import Window
-from kivy.properties import (StringProperty, ListProperty, NumericProperty,
-                             BooleanProperty, ObjectProperty)
-from kivy.uix.screenmanager import ScreenManager, Screen, NoTransition
-from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.gridlayout import GridLayout
-from kivy.uix.label import Label
-from kivy.uix.button import Button
-from kivy.uix.textinput import TextInput
-from kivy.uix.spinner import Spinner
-from kivy.uix.checkbox import CheckBox
-from kivy.uix.popup import Popup
-from kivy.uix.scrollview import ScrollView
-from kivy.uix.recycleview import RecycleView
-from kivy.uix.recycleview.views import RecycleDataViewBehavior
-from kivy.uix.behaviors import ButtonBehavior
-from kivy.uix.widget import Widget
+# 授权体系（ECDSA 非对称签名，本 App 只含公钥）
+# 放在最前面 import：这两个模块不依赖 Kivy，授权逻辑要在任何 UI 之前就绪
+import ecdsa_p256
+import license_core as LIC
+
+# ==============================================================================
+# 【诊断引导块 A】—— 在任何 Kivy 代码之前建立日志 / 阶段记录 / 崩溃逃生通道
+# 目的：定位"显示启动图后闪退"。不依赖数据线，靠三条通道把信息送出来：
+#   1) 手机剪贴板（每次阶段推进都刷新，你粘贴出来即可）
+#   2) 文件（应用外部私有目录 / 内部私有目录 / sdcard）
+#   3) 崩溃时弹一个错误界面（截图即可）
+# 问题定位后，把「诊断引导块 A/B/C」三块整段删除即可恢复干净版本。
+# ==============================================================================
+DIAG_VERSION = "2.1.1-diag"
+_DIAG_LINES = []
+_DIAG_FILES = []
+_DIAG_STAGE = "S0 脚本开始执行"
+
+
+def _diag_collect_paths():
+    """列出所有可能可写的日志路径（按成功率排序）"""
+    out = []
+    for env in ("ANDROID_PRIVATE", "ANDROID_ARGUMENT"):
+        try:
+            p = os.environ.get(env)
+            if p and os.path.isdir(p):
+                out.append(os.path.join(p, "baozupo_log.txt"))
+        except Exception:
+            pass
+    try:
+        from jnius import autoclass
+        act = autoclass("org.kivy.android.PythonActivity").mActivity
+        d = act.getExternalFilesDir(None)
+        if d is not None:
+            out.append(os.path.join(d.getAbsolutePath(), "baozupo_log.txt"))
+    except Exception:
+        pass
+    for d in ("/sdcard/Download", "/storage/emulated/0/Download", "/sdcard"):
+        try:
+            if os.path.isdir(d):
+                out.append(os.path.join(d, "baozupo_log.txt"))
+        except Exception:
+            pass
+    try:
+        out.append(os.path.join(os.path.expanduser("~"), "baozupo_log.txt"))
+    except Exception:
+        pass
+    uniq = []
+    for p in out:
+        if p not in uniq:
+            uniq.append(p)
+    return uniq
+
+
+def _diag_write(text):
+    """写一行日志：内存 + 所有可写文件"""
+    try:
+        _DIAG_LINES.append(text)
+        if len(_DIAG_LINES) > 400:
+            del _DIAG_LINES[:100]
+    except Exception:
+        pass
+    for path in _DIAG_FILES:
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(text + "\n")
+        except Exception:
+            pass
+
+
+def _diag_init_log():
+    """逐个尝试打开日志文件，第一个成功的作为主日志"""
+    for p in _diag_collect_paths():
+        try:
+            d = os.path.dirname(p)
+            if d and not os.path.isdir(d):
+                os.makedirs(d, exist_ok=True)
+            with open(p, "a", encoding="utf-8") as f:
+                f.write("\n\n########## %s 启动 %s ##########\n"
+                        % (DIAG_VERSION, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            _DIAG_FILES.append(p)
+        except Exception:
+            continue
+    _diag_write("日志文件候选: %s" % (_DIAG_FILES or "全部不可写"))
+
+
+def _diag_clip(text):
+    """把文本放进系统剪贴板（安卓）。任何失败都静默忽略。"""
+    try:
+        from jnius import autoclass, cast
+        activity = autoclass("org.kivy.android.PythonActivity").mActivity
+        Context = autoclass("android.content.Context")
+        cm = cast("android.content.ClipboardManager",
+                  activity.getSystemService(Context.CLIPBOARD_SERVICE))
+        ClipData = autoclass("android.content.ClipData")
+        cm.setPrimaryClip(ClipData.newPlainText("baozupo-diag", text))
+        return True
+    except Exception:
+        return False
+
+
+def _diag_report(stage, extra=""):
+    """记录阶段：写日志 + 刷新剪贴板（剪贴板里永远保留『最后到达阶段』）"""
+    global _DIAG_STAGE
+    _DIAG_STAGE = stage
+    _diag_write("[阶段] %s %s" % (stage, extra))
+    tail = "\n".join(_DIAG_LINES[-25:])
+    _diag_clip("【包租婆诊断 %s】\n最后到达阶段: %s\n\n----- 日志尾部 -----\n%s\n"
+               "------------------\n(完整日志: %s)"
+               % (DIAG_VERSION, stage, tail, (_DIAG_FILES[0] if _DIAG_FILES else "无")))
+
+
+def _diag_env_dump():
+    """环境信息：出问题时用来判断是不是版本/机型/权限相关"""
+    info = []
+    try:
+        info.append("python: %s" % sys.version.replace("\n", " "))
+    except Exception:
+        pass
+    try:
+        import platform as _pf
+        info.append("machine: %s" % _pf.machine())
+        info.append("release: %s" % _pf.release())
+        info.append("android_ver: %s" % os.environ.get("ANDROID_ARGUMENT", ""))
+    except Exception:
+        pass
+    try:
+        info.append("sys.path: %s" % sys.path[:6])
+    except Exception:
+        pass
+    try:
+        ap = os.environ.get("ANDROID_PRIVATE", "")
+        info.append("ANDROID_PRIVATE: %s" % ap)
+        if ap and os.path.isdir(ap):
+            info.append("private dir 内容: %s" % sorted(os.listdir(ap))[:30])
+    except Exception as e:
+        info.append("private dir 读取失败: %r" % (e,))
+    try:
+        info.append("BASE_DIR: %s" % _diag_base_dir())
+    except Exception:
+        pass
+    for line in info:
+        _diag_write("  " + str(line))
+
+
+def _diag_base_dir():
+    try:
+        return os.path.dirname(os.path.abspath(__file__))
+    except Exception:
+        return "?"
+
+
+_diag_init_log()
+
+# ---- native 崩溃取证：faulthandler（SIGSEGV / SIGABRT 等）----
+try:
+    import faulthandler
+    _FAULT_FILE = (os.path.join(os.path.dirname(_DIAG_FILES[0]), "baozupo_crash.txt")
+                   if _DIAG_FILES else None)
+    if _FAULT_FILE:
+        _FF = open(_FAULT_FILE, "a", buffering=1)
+        _FF.write("\n\n===== 启动 %s =====\n" % datetime.now().strftime("%m-%d %H:%M:%S"))
+        faulthandler.enable(file=_FF, all_threads=True)
+        _diag_write("faulthandler -> %s" % _FAULT_FILE)
+        # 把上一次的 native 崩溃栈回放进剪贴板（粘贴即可看到，不需要数据线）
+        try:
+            _prev = io.open(_FAULT_FILE, encoding="utf-8", errors="replace").read()
+            if "Current thread" in _prev or "Fatal Python error" in _prev:
+                _diag_clip("【上次 native 崩溃栈】\n" + _prev[-3000:])
+        except Exception:
+            pass
+except Exception as _e:
+    _diag_write("faulthandler 启用失败: %r" % (_e,))
+_diag_write("=" * 60)
+_diag_write("诊断版启动 %s" % DIAG_VERSION)
+_diag_env_dump()
+_diag_report("S0 诊断块初始化完成")
+# ==============================================================================
+# 【filetype 兜底】Kivy 2.3.1 的 kivy/core/image/__init__.py 会 import filetype，
+# 而本地 kivy recipe 为了绕开 charset_normalizer 装不上，去掉了 python_depends，
+# 于是 filetype 不会自动进 APK（真机报错：No module named 'filetype'）。
+# 解决办法：把 filetype 源码随工程一起打包，并在导入 kivy 前确保它在 sys.path 里。
+# ==============================================================================
+try:
+    _BD = os.path.dirname(os.path.abspath(__file__))
+    if _BD not in sys.path:
+        sys.path.insert(0, _BD)
+    import filetype as _ft
+    _diag_write("filetype 可用: %s" % getattr(_ft, "__file__", "?"))
+except Exception as _e:
+    _diag_write("!! filetype 不可用: %r" % (_e,))
+    _diag_report("S0.1 filetype 不可用: %r" % (_e,))
+
+_diag_report("S1 开始导入 Kivy")
+
+
+# ==============================================================================
+# 诊断引导块 A2：崩溃取证 + 细粒度导入
+#   上一版证据：日志停在 S1.2，且没有 traceback（裸 import 抛异常会直接杀进程）。
+#   本版：每条 import 单独 try，失败立即写 traceback + 剪贴板 + 弹 AlertDialog。
+# ==============================================================================
+def _diag_alert(text):
+    """安卓上弹一个可长按复制的对话框；任何失败都静默。"""
+    try:
+        from jnius import autoclass, PythonJavaClass, java_method
+        act = autoclass("org.kivy.android.PythonActivity").mActivity
+        AlertDialog = autoclass("android.app.AlertDialog")
+        builder = AlertDialog.Builder(act)
+        builder.setTitle("启动失败诊断")
+        builder.setMessage(text[:3000])
+        builder.setPositiveButton("关闭", None)
+
+        class _Run(PythonJavaClass):
+            __javainterfaces__ = ["java/lang/Runnable"]
+
+            @java_method("()V")
+            def run(self):
+                try:
+                    builder.show()
+                except Exception:
+                    pass
+
+        act.runOnUiThread(_Run())
+    except Exception:
+        try:
+            from jnius import autoclass
+            act = autoclass("org.kivy.android.PythonActivity").mActivity
+            Toast = autoclass("android.widget.Toast")
+            Toast.makeText(act, autoclass("java.lang.String")(text[:200]),
+                           Toast.LENGTH_LONG).show()
+        except Exception:
+            pass
+
+
+def _diag_crash(stage, err):
+    """崩溃取证：日志 + 剪贴板 + 弹窗，然后退出。"""
+    try:
+        tb = "".join(traceback.format_exception(type(err), err, err.__traceback__))
+    except Exception:
+        tb = repr(err)
+    msg = "【包租婆诊断 %s】\n崩溃阶段: %s\n\n%s" % (DIAG_VERSION, stage, tb)
+    _diag_write("!! 崩溃 %s\n%s" % (stage, tb))
+    for path in _DIAG_FILES:
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(msg + "\n")
+        except Exception:
+            pass
+    _diag_clip(msg)
+    _diag_alert(msg)
+    sys.exit(1)
+
+
+def _diag_step(stage, code):
+    """执行一条 import 语句（用 exec 注入模块全局），失败立刻取证。"""
+    _diag_report(stage)
+    try:
+        exec(code, globals())
+    except BaseException as _e:
+        _diag_crash(stage, _e)
+
+
+_diag_report("S1.1 导入 kivy 基础包")
+try:
+    import kivy
+except BaseException as _e:
+    _diag_crash("S1.1 import kivy", _e)
+_diag_report("S1.1 OK kivy=%s" % getattr(kivy, "__version__", "?"))
+
+# ---- S1.1.x 环境取证：native 库目录 / dlopen 能力 / bundle 完整性 ----
+_diag_report("S1.1.A 探测 nativeLibraryDir")
+try:
+    from jnius import autoclass
+    _act = autoclass("org.kivy.android.PythonActivity").mActivity
+    _nd = _act.getApplicationInfo().nativeLibraryDir
+    _diag_write("nativeLibraryDir: %s" % _nd)
+    try:
+        _diag_write("nativeLibs: %s" % sorted(os.listdir(_nd)))
+    except Exception as _e:
+        _diag_write("nativeLibs 读取失败: %r" % (_e,))
+except Exception as _e:
+    _diag_write("nativeLibraryDir 获取失败: %r" % (_e,))
+
+_diag_report("S1.1.B 测试 dlopen libpython3.11.so")
+try:
+    import ctypes
+    _h = ctypes.CDLL("libpython3.11.so")
+    _diag_write("dlopen libpython3.11.so: OK -> %s" % _h)
+except Exception as _e:
+    _diag_write("dlopen libpython3.11.so 失败: %r" % (_e,))
+    _diag_report("S1.1.B dlopen 失败: %r" % (_e,))
+
+_diag_report("S1.1.C 检查 kivy 包完整性")
+try:
+    _kd = os.path.dirname(os.path.abspath(kivy.__file__))
+    _diag_write("kivy dir: %s" % _kd)
+    _diag_write("kivy 顶层: %s" % sorted(os.listdir(_kd))[:40])
+    for _sub in ("core", "graphics", "uix", "lib"):
+        _diag_write("  %s 存在: %s" % (_sub, os.path.isdir(os.path.join(_kd, _sub))))
+    _diag_write("  _clock.so 存在: %s" % os.path.isfile(os.path.join(_kd, "_clock.so")))
+except Exception as _e:
+    _diag_write("kivy 目录探测失败: %r" % (_e,))
+
+
+_diag_step("S1.2.1 kivy.utils", "from kivy.utils import platform")
+_diag_step("S1.2.2 kivy.logger", "from kivy.logger import Logger")
+_diag_step("S1.2.3 kivy.config", "from kivy.config import Config")
+_diag_step("S1.2.4 kivy.clock (_clock.so)", "from kivy.clock import Clock")
+_diag_step("S1.2.5 kivy.metrics (_metrics.so)", "from kivy.metrics import dp, sp")
+_diag_step("S1.2.6 kivy.graphics (graphics/*.so)", "import kivy.graphics")
+_diag_step("S1.2.7 kivy.core.window (_window_sdl2.so + SDL2)", "from kivy.core.window import Window")
+_diag_step("S1.2.8 kivy.lang", "from kivy.lang import Builder")
+_diag_step("S1.2.9 kivy.properties (properties.so)",
+           "from kivy.properties import StringProperty, ListProperty, NumericProperty, BooleanProperty, ObjectProperty")
+_diag_step("S1.2.10 kivy.event (_event.so)", "from kivy.event import EventDispatcher")
+_diag_step("S1.2.11 kivy.app (含 kivy.base/input)", "from kivy.app import App")
+_diag_step("S1.3 kivy.core.text (text_layout.so)", "from kivy.core.text import LabelBase")
+_diag_step("S1.4 kivy.core.clipboard", "from kivy.core.clipboard import Clipboard")
+_diag_step("S1.5 kivy.uix 基础控件",
+           "from kivy.uix.boxlayout import BoxLayout; from kivy.uix.gridlayout import GridLayout; from kivy.uix.label import Label; from kivy.uix.button import Button; from kivy.uix.textinput import TextInput")
+_diag_step("S1.6 kivy.uix 高级控件",
+           "from kivy.uix.spinner import Spinner; from kivy.uix.checkbox import CheckBox; from kivy.uix.popup import Popup; from kivy.uix.scrollview import ScrollView; from kivy.uix.widget import Widget")
+_diag_step("S1.7 kivy.uix.screenmanager",
+           "from kivy.uix.screenmanager import ScreenManager, Screen, NoTransition")
+_diag_step("S1.8 kivy.uix.recycleview",
+           "from kivy.uix.recycleview import RecycleView; from kivy.uix.recycleview.views import RecycleDataViewBehavior; from kivy.uix.behaviors import ButtonBehavior")
+_diag_report("S1.9 全部 kivy 子模块导入完成")
+
+# ---- 诊断引导块 B：Kivy 导入成功 ----
+try:
+    import kivy as _kivy_mod
+    _diag_report("S2 Kivy 导入成功", "kivy=%s" % getattr(_kivy_mod, "__version__", "?"))
+except Exception as _e:
+    _diag_report("S2 Kivy 导入异常", repr(_e))
+
+# ---- 本项目自带模块（放在 Kivy 之后，因为它们依赖 Kivy）----
+# qrcode_mini  : 纯标准库二维码生成（缴费二维码分享用）
+# android_bridge: 扫码 / 直拨 / 分享，全部可降级，导入失败也不影响主流程
+try:
+    import qrcode_mini
+except Exception as _e:
+    qrcode_mini = None
+    _diag_report("S2.1 二维码模块导入失败", repr(_e))
+try:
+    import android_bridge
+except Exception as _e:
+    android_bridge = None
+    _diag_report("S2.2 安卓桥接模块导入失败", repr(_e))
 
 # ==============================================================================
 # 一、基础信息与主题色
 # ==============================================================================
 APP_NAME = "包租婆出租屋管家"
-VERSION = "2.1.0"
+VERSION = "2.1.6"
 AUTHOR = "Paul"
 CONTACT = "15880355384"
 
@@ -61,6 +390,11 @@ C_LINE = (0.863, 0.886, 0.878, 1)
 C_DANGER = (0.753, 0.314, 0.302, 1)
 C_WARN = (0.851, 0.643, 0.255, 1)
 C_INFO = (0.243, 0.420, 0.478, 1)
+
+# 弹窗内部配色：Kivy 弹窗面板是深灰色，里面的文字必须用亮色才看得清
+POPUP_LABEL_C = (0.84, 0.89, 0.88, 1)   # 字段标签
+POPUP_TEXT_C = (0.93, 0.95, 0.95, 1)    # 正文
+BTN_NEUTRAL_C = (0.58, 0.63, 0.61, 1)   # 「取消」类按钮背景（深一点，白字才清楚）
 
 CARD_COLORS = [
     (0.184, 0.310, 0.310, 1), (0.290, 0.486, 0.349, 1), (0.243, 0.420, 0.478, 1),
@@ -100,6 +434,8 @@ def register_cjk_font():
 
 
 FONT_PATH = register_cjk_font()
+# ---- 诊断：字体是否找到（找不到只会显示方框，不会闪退，但一并记录）----
+_diag_report("S3 中文字体注册", "FONT_PATH=%s" % (FONT_PATH or "未找到"))
 
 # ==============================================================================
 # 三、存储目录
@@ -145,11 +481,59 @@ def public_dirs():
 
 
 DATA_FILE = os.path.join(app_data_dir(), "baozupo_data.json")
+_diag_report("S4 数据目录就绪", "DATA_FILE=%s" % DATA_FILE)
+
+# ==============================================================================
+# 三·一、收费版 / 授权
+# ------------------------------------------------------------------------------
+# 本 App 是纯本地单机程序（没有服务器），所以付款结果无法自动回传。
+# 采用「收款码 + 激活码」的离线方案：
+#   1) 用户在「我的 → 升级 / 支持作者」里扫码付款；
+#   2) 加作者微信发截图，把页面上显示的「设备码」一起发过来；
+#   3) 作者用《授权码生成器.html》按设备码生成激活码，回发给用户；
+#   4) 用户在 App 内输入激活码 → 本地校验（SHA-256 派生）→ 解锁付费功能。
+# 校验完全离线，不需要联网、不需要服务器。
+# ==============================================================================
+# 收款码 / 名片二维码（放在 assets 下，随 APK 一起打包）
+QR_PAY_IMG = os.path.join(BASE_DIR, "assets", "wx_pay.jpg")     # 微信收款码
+QR_CARD_IMG = os.path.join(BASE_DIR, "assets", "wx_card.jpg")   # 微信名片（加好友）
+
+# 【重要】本 App 只持有公钥，私钥只存在于作者的《发码器》APK 里，永不进入任何安装包。
+# 授权码 = 作者用私钥对 "BZP2|<设备码>" 做 ECDSA P-256 签名得到的 104 位码。
+# 因此即使有人解包本 APK 拿到全部文件，也伪造不出任何一台设备的激活码。
+# 公钥若需更换（换密钥对），已发出去的旧码会失效，需重发。
+LICENSE_FILE = os.path.join(app_data_dir(), "baozupo_license.json")
+
+PRICE_TEXT = "29.9"           # 升级页显示的价格（纯文案，收款码本身不含金额）
+FREE_REMINDER_ROWS = 3        # 免费版在首页能看到的「到期提醒」条数
+LIC_CHARS = LIC.CHARS         # 设备码字符集（与编解码共用一份，避免两边不一致）
+
+
+def lic_device_new():
+    """新建设备码（8 位，显示成 XXXX-XXXX）"""
+    return "".join(random.choice(LIC_CHARS) for _ in range(8))
+
+
+def lic_fmt(group):
+    """ABCDEFGH -> ABCD-EFGH"""
+    return "-".join(group[i:i + 4] for i in range(0, len(group), 4))
+
+
+def lic_check(inp, device):
+    """校验激活码对本机是否有效。返回 (是否通过, 失败原因)"""
+    return LIC.check_code(inp, device, ecdsa_p256.verify)
+
 
 # ==============================================================================
 # 四、数据层
 # ==============================================================================
-EMPTY_DATA = {"houses": [], "tenants": [], "payments": [], "utilities": []}
+# meters：智能水电表档案（房间 + 水/电表号 + 上次读数），扫码抄表时用来算用量
+EMPTY_DATA = {"houses": [], "tenants": [], "payments": [], "utilities": [], "meters": []}
+
+METER_KINDS = [("水表", "water"), ("电表", "elec")]
+METER_LABEL = {"water": "水表", "elec": "电表"}
+METER_UNIT = {"water": "吨", "elec": "度"}
+METER_PRICE_KEY = {"water": "price_water", "elec": "price_elec"}
 
 
 def is_number(s):
@@ -158,6 +542,44 @@ def is_number(s):
         return True
     except Exception:
         return False
+
+
+# ---------------------------------------------------------------- 身份证
+# GB 11643-1999：前 17 位加权求和 mod 11 得到校验位
+_ID_WEIGHT = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2]
+_ID_CHECK = "10X98765432"
+
+
+def check_idcard(s):
+    """身份证号校验，返回 (是否通过, 失败原因)。留空算通过（登记时允许后补）。"""
+    v = str(s or "").strip().upper().replace(" ", "")
+    if not v:
+        return True, ""
+    if len(v) == 15 and v.isdigit():
+        return False, "请填 18 位身份证号（15 位老号码需换领后再登记）"
+    if len(v) != 18:
+        return False, "身份证号应为 18 位，当前 %d 位" % len(v)
+    if not v[:17].isdigit() or not (v[17].isdigit() or v[17] == "X"):
+        return False, "身份证号前 17 位必须是数字，末位是数字或 X"
+    try:
+        y, m, d = int(v[6:10]), int(v[10:12]), int(v[12:14])
+        datetime(y, m, d)
+        if y < 1900 or y > datetime.now().year:
+            return False, "身份证里的出生日期不对（%d-%02d-%02d）" % (y, m, d)
+    except Exception:
+        return False, "身份证里的出生日期不合法"
+    total = sum(int(v[i]) * _ID_WEIGHT[i] for i in range(17))
+    if _ID_CHECK[total % 11] != v[17]:
+        return False, "身份证号校验位不对，可能抄错了一位"
+    return True, ""
+
+
+def idcard_short(s):
+    """列表里显示用的脱敏身份证：4403********1234"""
+    v = str(s or "").strip()
+    if len(v) < 10:
+        return v
+    return v[:4] + "*" * (len(v) - 8) + v[-4:]
 
 
 def normalize_yn(v):
@@ -229,7 +651,10 @@ class Store(object):
         self.settings = {"month_advance": 1, "year_advance": 7,
                          "price_water": 3.5, "price_elec": 0.65}
         self.users = []
+        self.lic = {}
+        self._lic_ready = False
         self.load()
+        self.lic_load()
 
     # ---------- 读写 ----------
     def load(self):
@@ -241,6 +666,46 @@ class Store(object):
                     self._absorb(raw)
         except Exception:
             pass
+        # 老备份里的租客没有 tid：补上并落盘，之后一律按 tid 认人
+        if self._ensure_tid():
+            self.save()
+
+    @staticmethod
+    def new_tid():
+        return "T%d" % random.randint(10000000, 99999999)
+
+    def _ensure_tid(self):
+        """给每个租客补一个唯一 id（老数据 / 老备份里没有这个字段）。
+
+        为什么必须补：任何一次 store.load() 都会把 JSON 重新读成一批「新 dict」，
+        手里攥着的旧 dict 再怎么改都不会写回文件 —— 表现为单人退租、设主租客、
+        修改租客资料「点了没反应」。有了 tid，load 完按 id 重新定位就稳了。
+        """
+        changed = False
+        seen = set()
+        for t in self.data.get("tenants", []):
+            if not isinstance(t, dict):
+                continue
+            tid = str(t.get("tid") or "").strip()
+            if (not tid) or (tid in seen):
+                for _ in range(30):
+                    tid = self.new_tid()
+                    if tid not in seen:
+                        break
+                t["tid"] = tid
+                changed = True
+            seen.add(str(t.get("tid")))
+        return changed
+
+    def tenant_by_id(self, tid):
+        """load() 之后按 id 重新定位同一个租客（拿不到就返回 None）"""
+        tid = str(tid or "").strip()
+        if not tid:
+            return None
+        for t in self.data.get("tenants", []):
+            if str(t.get("tid", "")) == tid:
+                return t
+        return None
 
     def _absorb(self, raw):
         d = raw.get("data") if isinstance(raw.get("data"), dict) else raw
@@ -270,18 +735,132 @@ class Store(object):
         return {"data": self.data, "settings": self.settings, "users": self.users,
                 "app": "baozupo", "version": VERSION, "export_time": now_str()}
 
+    # ---------- 授权（收费版） ----------
+    # 授权信息存在独立的 baozupo_license.json 里，和业务数据分开：
+    # 「清空所有业务数据」不会把已付费的授权一起清掉。
+    def lic_load(self, force=False):
+        if self._lic_ready and not force:
+            return self.lic
+        try:
+            if os.path.exists(LICENSE_FILE):
+                with open(LICENSE_FILE, "r", encoding="utf-8") as f:
+                    d = json.load(f)
+                if isinstance(d, dict):
+                    self.lic = d
+        except Exception:
+            pass
+        if not isinstance(self.lic, dict):
+            self.lic = {}
+        self._lic_ready = True
+        # 设备码：首次运行生成一次，之后固定不变（客户重装/换机会变，需重新发码）
+        if not self.lic.get("device"):
+            self.lic["device"] = lic_device_new()
+            self.lic_save()
+        return self.lic
+
+    def lic_save(self):
+        try:
+            with open(LICENSE_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.lic, f, ensure_ascii=False, indent=2)
+            return True
+        except Exception:
+            return False
+
+    @property
+    def device_id(self):
+        return self.lic_load().get("device", "")
+
+    @property
+    def paid(self):
+        """是否已解锁付费版"""
+        return bool(self.lic_load().get("activated"))
+
+    def try_activate(self, code):
+        """校验激活码并落盘。成功 True，失败 False（不改动任何状态）"""
+        ok, _why = lic_check(code, self.device_id)
+        if not ok:
+            return False
+        self.lic["activated"] = True
+        self.lic["code"] = (code or "").strip().upper()
+        self.lic["at"] = now_str()
+        self.lic["device"] = self.device_id
+        self.lic_save()
+        return True
+
+    def activate_reason(self, code):
+        """给界面用的失败原因（成功时返回空串）"""
+        ok, why = lic_check(code, self.device_id)
+        return "" if ok else why
+
     # ---------- 查询 ----------
     def houses(self):
         return self.data["houses"]
 
+    def active_tenants(self, room):
+        """同一房间在租的全部租客（合租：一间房可以登记多个人）"""
+        return [t for t in self.data["tenants"]
+                if str(t.get("room")) == str(room) and not t.get("is_leave", False)]
+
     def current_tenant(self, room):
-        for t in self.data["tenants"]:
-            if str(t.get("room")) == str(room) and not t.get("is_leave", False):
+        """主租客：优先取标了 is_main 的，没有就取第一个在租的。
+        老数据没有 is_main 字段，行为与以前完全一致（取第一个）。"""
+        ts = self.active_tenants(room)
+        if not ts:
+            return None
+        for t in ts:
+            if t.get("is_main", False):
                 return t
-        return None
+        return ts[0]
 
     def tenants_of(self, room):
         return [t for t in self.data["tenants"] if str(t.get("room")) == str(room)]
+
+    # ---------- 智能水电表档案 ----------
+    def meters_of(self, room):
+        return [m for m in self.data.get("meters", [])
+                if str(m.get("room")) == str(room)]
+
+    def find_meter(self, room, kind):
+        for m in self.data.get("meters", []):
+            if str(m.get("room")) == str(room) and str(m.get("kind")) == str(kind):
+                return m
+        return None
+
+    def set_meter(self, room, kind, no=None, qr=None, last=None,
+                  month=None, price=None):
+        """建档 / 更新一只表。传 None 的字段保持原值。"""
+        if not isinstance(self.data.get("meters"), list):
+            self.data["meters"] = []
+        m = self.find_meter(room, kind)
+        if m is None:
+            m = {"room": str(room), "kind": kind, "no": "", "qr": "",
+                 "last": "", "month": "", "price": "", "updated": ""}
+            self.data["meters"].append(m)
+        if no is not None:
+            m["no"] = str(no)
+        if qr is not None:
+            m["qr"] = str(qr)
+        if last is not None:
+            m["last"] = str(last)
+        if month is not None:
+            m["month"] = str(month)
+        if price is not None:
+            m["price"] = str(price)
+        m["updated"] = now_str()
+        return m
+
+    def meter_price(self, kind, room=None):
+        """单价：这只表单独设过就用表上的，否则用全局设置（水 3.5 / 电 0.65）"""
+        if room is not None:
+            m = self.find_meter(room, kind)
+            if m and is_number(m.get("price")) and float(m["price"]) > 0:
+                return float(m["price"])
+        key = METER_PRICE_KEY.get(kind, "price_water")
+        default = 3.5 if kind == "water" else 0.65
+        try:
+            return float(self.settings.get(key, default))
+        except Exception:
+            return default
 
     def pays_of(self, room):
         return [p for p in self.data["payments"] if str(p.get("room")) == str(room)]
@@ -325,7 +904,8 @@ class Store(object):
         return False
 
     # ---------- 统计 ----------
-    def stats(self, ym):
+    def _snapshot_stats(self):
+        """「当前快照」类指标：房间数 / 在租 / 押金 / 月租合计 —— 与统计区间无关"""
         houses = self.data["houses"]
         total = len(houses)
         rented = len([h for h in houses if h.get("status") == "已租"])
@@ -333,13 +913,24 @@ class Store(object):
                       if not t.get("is_leave", False) and is_number(t.get("deposit")))
         rent_sum = sum(float(h["price"]) for h in houses
                        if h.get("status") == "已租" and is_number(h.get("price")))
-        paid_rent = sum(float(p.get("money", 0)) for p in self.data["payments"]
-                        if str(p.get("date", "")).startswith(ym) and is_number(p.get("money")))
+        return total, rented, deposit, rent_sum
+
+    def _money_of(self, prefix):
+        """按前缀累加收租与水电：prefix 可以是 '2026-03'（月）也可以是 '2026'（年）"""
+        paid = sum(float(p.get("money", 0)) for p in self.data["payments"]
+                   if str(p.get("date", "")).startswith(prefix) and is_number(p.get("money")))
         elec = water = 0.0
         for u in self.data["utilities"]:
-            if str(u.get("month", "")) == ym and is_number(u.get("elec")) and is_number(u.get("water")):
+            if str(u.get("month", "")).startswith(prefix) \
+                    and is_number(u.get("elec")) and is_number(u.get("water")):
                 elec += float(u["elec"])
                 water += float(u["water"])
+        return paid, elec, water
+
+    def stats(self, ym):
+        """按月统计（原有行为不变）"""
+        total, rented, deposit, rent_sum = self._snapshot_stats()
+        paid_rent, elec, water = self._money_of(str(ym))
         return {
             "总房间": str(total), "已租": str(rented), "空闲": str(total - rented),
             "已收押金": "%.0f元" % deposit, "月租合计": "%.0f元" % rent_sum,
@@ -347,6 +938,66 @@ class Store(object):
             "已收电费": "%.0f元" % elec, "已收水费": "%.0f元" % water,
             "当月总收费": "%.0f元" % (paid_rent + elec + water),
         }
+
+    def stats_year(self, year):
+        """按年统计：房间/押金是快照，收租与水电按整年累加；
+        年租合计 = 在租房月租 × 12，未收 = 年应收 - 当年已收"""
+        total, rented, deposit, rent_sum = self._snapshot_stats()
+        paid_rent, elec, water = self._money_of(str(year))
+        year_rent = rent_sum * 12
+        return {
+            "总房间": str(total), "已租": str(rented), "空闲": str(total - rented),
+            "已收押金": "%.0f元" % deposit, "月租合计": "%.0f元" % year_rent,
+            "已收租金": "%.0f元" % paid_rent, "未收租金": "%.0f元" % max(0.0, year_rent - paid_rent),
+            "已收电费": "%.0f元" % elec, "已收水费": "%.0f元" % water,
+            "当月总收费": "%.0f元" % (paid_rent + elec + water),
+        }
+
+    def data_months(self, n=12):
+        """可选月份：最近 n 个月 + 数据里出现过的所有月份（去重，倒序）。
+        只给最近 12 个月的话，「往年」那几个月的数据在按月视图里根本选不到。"""
+        ms = set(gen_months(n))
+        for p in self.data.get("payments", []):
+            d = str(p.get("date", ""))
+            if len(d) >= 7 and d[:4].isdigit() and d[5:7].isdigit():
+                ms.add(d[:7])
+        for u in self.data.get("utilities", []):
+            mo = str(u.get("month", ""))
+            if len(mo) >= 7 and mo[:4].isdigit() and mo[5:7].isdigit():
+                ms.add(mo[:7])
+        return sorted(ms, reverse=True)
+
+    def data_years(self, n=6):
+        """可选年份：数据里出现过的年份 + 最近 n 年（去重，倒序）"""
+        years = set()
+        for p in self.data.get("payments", []):
+            d = str(p.get("date", ""))
+            if len(d) >= 4 and d[:4].isdigit():
+                years.add(d[:4])
+        for u in self.data.get("utilities", []):
+            mo = str(u.get("month", ""))
+            if len(mo) >= 4 and mo[:4].isdigit():
+                years.add(mo[:4])
+        now_y = datetime.now().year
+        for i in range(n):
+            years.add(str(now_y - i))
+        return sorted(years, reverse=True)
+
+    def range_records(self, prefix):
+        """统计区间内的明细流水：收租 + 水电，用于导出"""
+        pays = [p for p in self.data.get("payments", [])
+                if str(p.get("date", "")).startswith(prefix)]
+        utils = [u for u in self.data.get("utilities", [])
+                 if str(u.get("month", "")).startswith(prefix)]
+        try:
+            pays.sort(key=lambda x: (str(x.get("date", "")), room_key({"room": x.get("room", "")})))
+        except Exception:
+            pass
+        try:
+            utils.sort(key=lambda x: (str(x.get("month", "")), room_key({"room": x.get("room", "")})))
+        except Exception:
+            pass
+        return pays, utils
 
     def reminders(self):
         """返回 [(房间, 姓名, 到期日, 剩余天数)]，包含已过期"""
@@ -385,16 +1036,51 @@ class HouseCard(RecycleDataViewBehavior, BoxLayout):
     line1 = StringProperty("")
     line2 = StringProperty("")
     line3 = StringProperty("")
+    line4 = StringProperty("")
+    # 没有在租租客时，卡片上的「收租 / 水电」按钮置灰，避免空闲房凭空缴费
+    has_tenant = BooleanProperty(False)
     card_bg = ListProperty([1, 1, 1, 1])
     tag_bg = ListProperty([0.29, 0.49, 0.35, 1])
     tag_fg = ListProperty([1, 1, 1, 1])
+
+    # 双击卡片（按钮区除外）打开「查看详情」
+    # 不用 touch.is_double_tap：部分输入后端不设置该标志，自己按「时间 + 位置」判定更可靠
+    _TAP_GAP = 0.45        # 两次点击最大间隔（秒）
+    _TAP_DIST = 40         # 两次点击最大位移（dp），避免滚动/拖动被误判
+
+    def __init__(self, **kw):
+        super(HouseCard, self).__init__(**kw)
+        self._last_tap = 0.0
+        self._last_pos = (0, 0)
+
+    def _in_button_row(self, pos):
+        """底部 dp(34) 的按钮行 + padding：这一区域交给四个按钮，不参与双击"""
+        return pos[1] <= self.y + dp(48)
+
+    def on_touch_down(self, touch):
+        if self.collide_point(*touch.pos) and not self._in_button_row(touch.pos):
+            now = time.time()
+            dx = abs(touch.pos[0] - self._last_pos[0])
+            dy = abs(touch.pos[1] - self._last_pos[1])
+            if now - self._last_tap < self._TAP_GAP and dx < dp(self._TAP_DIST) \
+                    and dy < dp(self._TAP_DIST):
+                self._last_tap = 0.0
+                app = App.get_running_app()
+                if app is not None and self.room:
+                    app.open_detail(self.room)
+                return True
+            self._last_tap = now
+            self._last_pos = touch.pos
+        return super(HouseCard, self).on_touch_down(touch)
 
 
 class TenantCard(RecycleDataViewBehavior, BoxLayout):
     name = StringProperty("")
     room = StringProperty("")
+    tel = StringProperty("")          # 卡片上「拨打」按钮直接用它
     line1 = StringProperty("")
     line2 = StringProperty("")
+    line3 = StringProperty("")
     tag = StringProperty("")
     tag_bg = ListProperty([0.29, 0.49, 0.35, 1])
 
@@ -467,6 +1153,26 @@ def mk_spinner(values, text=""):
                    size_hint_y=None, height=dp(44), font_size=sp(15), color=C_TEXT)
 
 
+def text_lines_h(text, font_size, max_w, min_h=0):
+    """按 max_w 宽度排版后，这段文字实际要占多少像素高。
+
+    为什么必须量：表单里的字段标签是「固定 height」的 Label，Kivy 既不裁剪也不撑高，
+    一旦中文长标签（如「入住日期 YYYY-MM-DD」「月租金元（只填数字）」）在半宽格里
+    折行，第二行会直接画到下边的输入框上 —— 真机上看到的就是「字重叠」。
+    提早按真实排版量出高度把行高留够，桌面和手机都不会挤。
+    """
+    if not text or max_w <= 1:
+        return max(min_h, font_size * 1.4)
+    try:
+        from kivy.core.text import Label as CoreLabel
+        probe = CoreLabel(text=text, font_size=font_size, text_size=(max_w, None))
+        probe.refresh()
+        h = probe.texture.size[1] if probe.texture else 0
+        return max(min_h, h)
+    except Exception:
+        return max(min_h, font_size * 1.4)
+
+
 class FormDialog(Popup):
     """通用表单弹窗：每个字段「标签在上、输入框在下」，手机上最清晰
     fields = [{key,label,kind,values,value,hint,readonly,half,on_change}]
@@ -475,40 +1181,61 @@ class FormDialog(Popup):
       on_change : 下拉框选中后的回调 (widget, text, all_widgets)
     """
 
-    ROW_H = 68        # 单行字段总高（标签 20 + 输入框 44 + 间距）
+    # 注意：整体尺寸不能写死像素。曾写成 ROW_H = 68（原始像素），在 density≈2.75
+    # 的真机上 68px 根本装不下 dp(20) 的标签 + dp(44) 的输入框（共约 175px），
+    # 于是「添加房间 / 修改密码 / 全局提醒设置」的表单全部挤在一起重叠。
+    # 现在全部改为实例化时用 dp() 计算，桌面（density=1）与手机表现一致。
+
+    POPUP_W = 0.94          # 与下面 self.size_hint_x 保持一致
 
     def __init__(self, title, fields, on_submit, submit_text="保存", **kw):
         super(FormDialog, self).__init__(**kw)
+        self.ctl_h = dp(44)                           # 输入框 / 下拉框高
         self.title = title
         self.title_size = sp(16)
         self.auto_dismiss = False
         self._on_submit = on_submit
         self._widgets = {}
 
+        # 预先算出「全宽 / 半宽」两种格子各自有多少横向空间，用来预判标签是否折行
+        inner_w = Window.width * self.POPUP_W - dp(16)      # root 左右各 dp(8) padding
+        half_w = (inner_w - dp(8)) / 2.0                    # 半宽行内部 spacing dp(8)
+
         grid = GridLayout(cols=1, spacing=dp(4), size_hint_y=None, padding=[0, 0])
         grid.bind(minimum_height=grid.setter("height"))
-        pending = None
-        for f in fields:
-            cell = self._make_cell(f)
-            if f.get("half"):
-                if pending is None:
-                    pending = BoxLayout(orientation="horizontal", size_hint_y=None,
-                                        height=self.ROW_H, spacing=dp(8))
-                    pending.add_widget(cell)
-                    grid.add_widget(pending)
-                else:
-                    pending.add_widget(cell)
-                    pending = None
-            else:
-                if pending is not None:
-                    pending.add_widget(Widget())
-                    pending = None
-                grid.add_widget(cell)
 
-        row_count = len(grid.children)
-        body_h = dp(74) + self.ROW_H * row_count + dp(56)
+        cells = [(f, self._make_cell(f, half_w if f.get("half") else inner_w))
+                 for f in fields]
+
+        i = 0
+        while i < len(cells):
+            f, cell = cells[i]
+            nxt = cells[i + 1] if i + 1 < len(cells) else None
+            if f.get("half"):
+                row_h = cell.height
+                if nxt is not None and nxt[0].get("half"):
+                    row_h = max(cell.height, nxt[1].height)
+                    cell.height = nxt[1].height = row_h
+                    row = BoxLayout(orientation="horizontal", size_hint_y=None,
+                                    height=row_h, spacing=dp(8))
+                    row.add_widget(cell)
+                    row.add_widget(nxt[1])
+                    grid.add_widget(row)
+                    i += 2
+                    continue
+                row = BoxLayout(orientation="horizontal", size_hint_y=None,
+                                height=row_h, spacing=dp(8))
+                row.add_widget(cell)
+                row.add_widget(Widget())
+                grid.add_widget(row)
+                i += 1
+                continue
+            grid.add_widget(cell)
+            i += 1
+
+        body_h = dp(74) + sum(c.height for c in grid.children) + dp(56)
         max_h = Window.height * 0.95
-        self.size_hint = (0.94, None)
+        self.size_hint = (self.POPUP_W, None)
         self.height = min(body_h, max_h)
 
         root = BoxLayout(orientation="vertical", spacing=dp(4),
@@ -522,7 +1249,7 @@ class FormDialog(Popup):
             root.add_widget(Widget())
 
         bar = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
-        b_cancel = Button(text="取消", font_size=sp(15), background_color=(0.78, 0.80, 0.79, 1),
+        b_cancel = Button(text="取消", font_size=sp(15), background_color=BTN_NEUTRAL_C,
                           color=(1, 1, 1, 1))
         b_cancel.bind(on_release=lambda *_: self.dismiss())
         b_ok = Button(text=submit_text, font_size=sp(15), background_color=C_ACCENT,
@@ -533,11 +1260,15 @@ class FormDialog(Popup):
         root.add_widget(bar)
         self.content = root
 
-    def _make_cell(self, f):
-        cell = BoxLayout(orientation="vertical", size_hint_y=None, height=self.ROW_H - dp(4),
-                         spacing=dp(1))
-        lab = Label(text=f.get("label", ""), size_hint_y=None, height=dp(20),
-                    font_size=sp(12), color=C_MUTED, halign="left", valign="middle")
+    def _make_cell(self, f, avail_w):
+        lab_fs = sp(12)
+        lab_h = max(dp(20), text_lines_h(f.get("label", ""), lab_fs, avail_w) + dp(4))
+        row_h = lab_h + self.ctl_h + dp(6)
+        cell = BoxLayout(orientation="vertical", size_hint_y=None, height=row_h,
+                         spacing=dp(2))
+        lab = Label(text=f.get("label", ""), size_hint_y=None, height=lab_h,
+                    font_size=lab_fs, color=POPUP_LABEL_C, halign="left", valign="top",
+                    shorten=True, shorten_from="right")
         lab.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
         cell.add_widget(lab)
         if f.get("kind") == "combo":
@@ -559,21 +1290,39 @@ class FormDialog(Popup):
             self.dismiss()
 
 
-def info_popup(title, message, on_close=None, btn="知道了"):
+def info_popup(title, message, on_close=None, btn="知道了", extra_btn=None):
+    """extra_btn=(按钮文字, 回调)：用于「查看详情时顺手导出」这类场景。"""
     box = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
     sv = ScrollView(do_scroll_x=False)
-    lab = Label(text=message, size_hint_y=None, font_size=sp(14), color=C_TEXT,
+    lab = Label(text=message, size_hint_y=None, font_size=sp(14), color=POPUP_TEXT_C,
                 halign="left", valign="top")
     lab.bind(width=lambda w, *_: setattr(w, "text_size", (w.width, None)))
     lab.bind(texture_size=lambda w, *_: setattr(w, "height", w.texture_size[1]))
     sv.add_widget(lab)
     box.add_widget(sv)
-    b = Button(text=btn, size_hint_y=None, height=dp(46), font_size=sp(15),
-               background_color=C_ACCENT, color=(1, 1, 1, 1))
-    box.add_widget(b)
-    p = Popup(title=title, title_size=sp(16), content=box, size_hint=(0.92, 0.7),
-              auto_dismiss=True)
-    b.bind(on_release=lambda *_: p.dismiss())
+    # 高度跟着文案走：写死 0.7 屏高时短提示下面一大片空白，长提示又被压扁
+    _w = Window.width * 0.92 - dp(20)
+    _bh = text_lines_h(message, sp(14), _w, min_h=dp(60))
+    _h = min(max(dp(200), _bh + dp(46) + dp(60) + (dp(50) if extra_btn else 0)),
+             Window.height * 0.88)
+    p = Popup(title=title, title_size=sp(16), content=box, size_hint=(0.92, None),
+              height=_h, auto_dismiss=True)
+    if extra_btn:
+        bar = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
+        b2 = Button(text=extra_btn[0], font_size=sp(15),
+                    background_color=C_INFO, color=(1, 1, 1, 1))
+        b2.bind(on_release=lambda *_: extra_btn[1]())
+        b1 = Button(text=btn, size_hint_x=0.45, font_size=sp(15),
+                    background_color=C_ACCENT, color=(1, 1, 1, 1))
+        bar.add_widget(b2)
+        bar.add_widget(b1)
+        box.add_widget(bar)
+        b1.bind(on_release=lambda *_: p.dismiss())
+    else:
+        b = Button(text=btn, size_hint_y=None, height=dp(46), font_size=sp(15),
+                   background_color=C_ACCENT, color=(1, 1, 1, 1))
+        box.add_widget(b)
+        b.bind(on_release=lambda *_: p.dismiss())
     if on_close:
         p.bind(on_dismiss=lambda *_: on_close())
     p.open()
@@ -582,19 +1331,32 @@ def info_popup(title, message, on_close=None, btn="知道了"):
 
 def confirm_popup(title, message, on_yes, yes_text="确定", danger=False):
     box = BoxLayout(orientation="vertical", spacing=dp(10), padding=dp(10))
-    lab = Label(text=message, font_size=sp(14), color=C_TEXT, halign="left", valign="top")
+    # ★ 文案不再「写死 dp(230) 塞进剩余空间」：像「重复收租？」这种会把历史上每笔
+    #   记录逐行列出来的长文案，塞进固定高度就会被压扁成一片重叠。
+    #   现在：文字自己测高 → 包 ScrollView → 弹窗高度跟着文案走（最多占 92% 屏高）。
+    sv = ScrollView(do_scroll_x=False)
+    lab = Label(text=message, size_hint_y=None, font_size=sp(14), color=POPUP_TEXT_C,
+                halign="left", valign="top")
     lab.bind(width=lambda w, *_: setattr(w, "text_size", (w.width, None)))
-    box.add_widget(lab)
+    lab.bind(texture_size=lambda w, *_: setattr(w, "height", w.texture_size[1]))
+    sv.add_widget(lab)
+    box.add_widget(sv)
     bar = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
-    b_no = Button(text="取消", font_size=sp(15), background_color=(0.78, 0.80, 0.79, 1),
+    b_no = Button(text="取消", font_size=sp(15), background_color=BTN_NEUTRAL_C,
                   color=(1, 1, 1, 1))
     b_yes = Button(text=yes_text, font_size=sp(15),
                    background_color=C_DANGER if danger else C_ACCENT, color=(1, 1, 1, 1))
     bar.add_widget(b_no)
     bar.add_widget(b_yes)
     box.add_widget(bar)
+
+    body_w = Window.width * 0.9 - dp(20)
+    body_h = text_lines_h(message, sp(14), body_w, min_h=dp(60))
+    # 余量给足（标题栏 + 按钮栏 + 内边距 + 半行），否则最后一行会被切一半
+    h = min(max(dp(260), body_h + dp(48) + dp(88)), Window.height * 0.92)
+
     p = Popup(title=title, title_size=sp(16), content=box, size_hint=(0.9, None),
-              height=dp(230), auto_dismiss=False)
+              height=h, auto_dismiss=False)
     b_no.bind(on_release=lambda *_: p.dismiss())
     b_yes.bind(on_release=lambda *_: (p.dismiss(), on_yes()))
     p.open()
@@ -608,6 +1370,9 @@ class BaozupoApp(App):
     version = StringProperty(VERSION)
     login_user = StringProperty("")
     stat_ym = StringProperty(datetime.now().strftime("%Y-%m"))
+    # 「按月 / 按年」两种统计口径：按年时用它选年份，可查往年
+    stat_mode = StringProperty("按月")
+    stat_year = StringProperty(str(datetime.now().year))
     filter_status = StringProperty("全部")
     search_key = StringProperty("")
 
@@ -616,9 +1381,11 @@ class BaozupoApp(App):
         return
 
     def build(self):
+        _diag_report("S5 进入 build()")
         self.title = APP_NAME
         self.store = Store()
         first = self.store.ensure_default_user()
+        _diag_report("S5.1 数据层初始化完成")
         if platform == "android":
             try:
                 Window.softinput_mode = "below_target"
@@ -626,8 +1393,11 @@ class BaozupoApp(App):
                 pass
 
         if not os.path.exists(KV_FILE):
+            _diag_report("S5.2 缺少 kv 文件", KV_FILE)
             return Label(text="缺少界面文件 baozupo.kv，\n请确认它和 main.py 在同一个目录里。")
+        _diag_report("S5.2 加载界面文件", KV_FILE)
         Builder.load_file(KV_FILE)
+        _diag_report("S5.3 界面文件解析完成")
 
         root = Root()                       # 规则已在上面注册，这里直接实例化即可
         self.root_widget = root
@@ -643,7 +1413,11 @@ class BaozupoApp(App):
             self.set_login_hint("首次使用可先用 admin / 123456 登录，或点下方注册新账号")
         self._sync_nav()
         Window.bind(on_keyboard=self.on_hardware_back)
+        _diag_report("S6 UI 构建完成，返回根组件")
         return root
+
+    def on_start(self):
+        _diag_report("S7 应用已进入前台（on_start）")
 
     # ------------------------------------------------------------------ 导航
     def _sync_nav(self, *a):
@@ -731,58 +1505,327 @@ class BaozupoApp(App):
         body = self.sm.get_screen("home").ids.body
         body.clear_widgets()
 
-        # 月份切换
-        bar = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8), padding=[dp(2), dp(2)])
-        lab = Label(text="统计月份", size_hint_x=None, width=dp(78), font_size=sp(13), color=C_MUTED)
+        # 统计区间切换：按月（含往月 12 个月） / 按年（含往年）
+        bar = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(6), padding=[dp(2), dp(2)])
+        lab = Label(text="统计区间", size_hint_x=None, width=dp(64), font_size=sp(13), color=C_MUTED)
         bar.add_widget(lab)
-        months = gen_months(12)
-        spn = mk_spinner(months, self.stat_ym if self.stat_ym in months else months[-1])
-        spn.bind(text=self.on_month_change)
-        bar.add_widget(spn)
+        mode_spn = mk_spinner(["按月", "按年"], self.stat_mode)
+        mode_spn.size_hint_x = None
+        mode_spn.width = dp(76)
+        mode_spn.bind(text=self.on_stat_mode_change)
+        bar.add_widget(mode_spn)
+        if self.stat_mode == "按年":
+            years = self.store.data_years()
+            if self.stat_year not in years:
+                years = years + [self.stat_year]
+            y_spn = mk_spinner(years, self.stat_year)
+            y_spn.bind(text=self.on_year_change)
+            bar.add_widget(y_spn)
+        else:
+            months = self.store.data_months()      # 含数据里出现过的往月，不只是最近 12 个月
+            m_spn = mk_spinner(months, self.stat_ym if self.stat_ym in months else months[0])
+            m_spn.bind(text=self.on_month_change)
+            bar.add_widget(m_spn)
+        btn_exp = Button(text="导出", size_hint_x=None, width=dp(58), font_size=sp(13),
+                         background_color=C_INFO, color=(1, 1, 1, 1))
+        btn_exp.bind(on_release=lambda *_: self.export_stats())
+        bar.add_widget(btn_exp)
         body.add_widget(bar)
 
         # 统计卡片（一行 5 个 × 2 行）
         grid = GridLayout(cols=5, spacing=dp(6), size_hint_y=None, padding=[0, dp(2)])
         grid.bind(minimum_height=grid.setter("height"))
-        data = self.store.stats(self.stat_ym)
-        for i, key in enumerate(["总房间", "已租", "空闲", "已收押金", "月租合计",
-                                 "已收租金", "未收租金", "已收电费", "已收水费", "当月总收费"]):
-            grid.add_widget(StatCard(label=key, value=data.get(key, "0"),
+        # (显示标签, 数据键) —— 注意按年时标签要改叫「年租合计 / 当年总收费」，
+        # 但数据键仍是 stats_year 返回的「月租合计 / 当月总收费」，两者必须映射对，
+        # 否则卡片会取不到值而显示 0（曾因此把 25200 显示成 0）。
+        if self.stat_mode == "按年":
+            data = self.store.stats_year(self.stat_year)
+            cards = [("总房间", "总房间"), ("已租", "已租"), ("空闲", "空闲"),
+                     ("已收押金", "已收押金"), ("年租合计", "月租合计"),
+                     ("已收租金", "已收租金"), ("未收租金", "未收租金"),
+                     ("已收电费", "已收电费"), ("已收水费", "已收水费"),
+                     ("当年总收费", "当月总收费")]
+            title = "实时统计（%s 年）" % self.stat_year
+        else:
+            data = self.store.stats(self.stat_ym)
+            cards = [(k, k) for k in ["总房间", "已租", "空闲", "已收押金", "月租合计",
+                                      "已收租金", "未收租金", "已收电费", "已收水费", "当月总收费"]]
+            title = "实时统计（%s）" % self.stat_ym
+        for i, (lab, dk) in enumerate(cards):
+            grid.add_widget(StatCard(label=lab, value=data.get(dk, "0"),
                                      bg=CARD_COLORS[i % len(CARD_COLORS)], height=dp(58)))
         body.add_widget(grid)
+        # 标题栏同步显示当前统计区间（KV 里是写死的「实时统计」）
+        try:
+            self.sm.get_screen("home").ids.title.text = title
+        except Exception:
+            pass
 
-        # 到期提醒
+        # 到期提醒（付费功能：免费版只给条数汇总，付费版列具体明细）
         rem = self.store.reminders()
+        paid = self.store.paid
         body.add_widget(self._section("到期提醒", "%d 条" % len(rem)))
         if not rem:
             body.add_widget(self._hint("暂无临近到期的租客"))
-        else:
+        elif paid:
             for room, name, od, left in rem[:8]:
                 txt = "%s · %s    到期 %s    %s" % (
                     room, name, od,
                     ("已过期 %d 天" % -left) if left < 0 else ("还剩 %d 天" % left))
                 bg = (0.99, 0.92, 0.92, 1) if left < 0 else (0.99, 0.97, 0.89, 1)
                 body.add_widget(self._row_card(txt, bg))
+        else:
+            body.add_widget(self._row_card(
+                "有 %d 位租客临近到期（免费版只显示条数）" % len(rem),
+                (0.99, 0.97, 0.89, 1)))
+            body.add_widget(self._upgrade_row("升级后可看到期房号 / 姓名 / 剩余天数"))
 
-        # 快捷操作
+        # 快捷操作（含全局搜索）
         body.add_widget(self._section("快捷操作", ""))
-        quick = GridLayout(cols=2, spacing=dp(8), size_hint_y=None, height=dp(112))
-        for text, cb in [("＋ 添加新房", lambda: self.open_house_form("add")),
-                         ("房屋租金一览", lambda: self.go("houses")),
-                         ("租客列表", lambda: self.go("tenants")),
-                         ("导出 / 导入备份", self.open_backup_menu)]:
-            b = Button(text=text, font_size=sp(14), background_color=C_ACCENT, color=(1, 1, 1, 1))
+        actions = [("搜索 房间 / 租客", self.open_global_search),
+                   ("＋ 添加新房", lambda: self.open_house_form("add")),
+                   ("房屋租金一览", lambda: self.go("houses")),
+                   ("租客列表", lambda: self.go("tenants")),
+                   ("导出 / 导入备份", self.open_backup_menu),
+                   ("导出当前统计", self.export_stats)]
+        rows = (len(actions) + 1) // 2
+        quick = GridLayout(cols=2, spacing=dp(8), size_hint_y=None,
+                           height=rows * dp(56) + (rows - 1) * dp(8))
+        for text, cb in actions:
+            b = Button(text=text, font_size=sp(14),
+                       background_color=C_INFO if text.startswith("搜索") else C_ACCENT,
+                       color=(1, 1, 1, 1))
             b.bind(on_release=lambda inst, f=cb: f())
             quick.add_widget(b)
         body.add_widget(quick)
 
-        body.add_widget(self._hint("数据文件：%s" % DATA_FILE))
+        # 数据文件路径只在「关于」里显示，首页不再占用版面
 
     def on_month_change(self, spinner, text):
         if not text or text == self.stat_ym:
             return
         self.stat_ym = text
         self.build_home()
+
+    def on_stat_mode_change(self, spinner, text):
+        """按月 <-> 按年：切换后重画首页（下拉框内容变了，必须重建）"""
+        if not text or text == self.stat_mode:
+            return
+        self.stat_mode = text
+        self.build_home()
+
+    def on_year_change(self, spinner, text):
+        if not text or text == self.stat_year:
+            return
+        self.stat_year = text
+        self.build_home()
+
+    # ---------------------------------------------------------- 搜索
+    def house_haystack(self, h):
+        """一套房的可搜索文本：房间号 / 地址 / 状态 / 面积 / 租金 / 配套 / 当前租客"""
+        room = str(h.get("room", ""))
+        t = self.store.current_tenant(room)
+        return " ".join([room, str(h.get("address", "")), str(h.get("status", "")),
+                         str(h.get("area", "")), str(h.get("price", "")),
+                         str(h.get("kitchen", "")), str(h.get("toilet", "")),
+                         str(h.get("balcony", "")),
+                         (t or {}).get("name", ""), (t or {}).get("tel", "")]).lower()
+
+    def match_tokens(self, hay, key):
+        """多关键词 AND：空格分隔，全部命中才算匹配（如「张三 138」）"""
+        key = (key or "").strip().lower()
+        if not key:
+            return True
+        return all(tok in hay for tok in key.split())
+
+    def _search_row(self, text, sub, on_hit, bg=(1, 1, 1, 1)):
+        """搜索结果行：主标题 + 副标题，整行可点。
+
+        注意：不要在 Button 里嵌 BoxLayout 装两个 Label —— Button 本身继承自 Label，
+        它会把子控件按自己的「文字区」摆放，实测两行文字会被挤到右边、甚至整行空白。
+        直接给 Button 一个多行 text，配 halign/valign + text_size 即可。
+        """
+        b = Button(text="%s\n%s" % (text, sub), size_hint_y=None, height=dp(58),
+                   font_size=sp(13), background_normal="", background_color=bg,
+                   color=C_TEXT, halign="left", valign="middle")
+        b.bind(size=lambda w, *_: setattr(w, "text_size", (w.width - dp(16), w.height)))
+        b.bind(on_release=on_hit)
+        return b
+
+    def open_global_search(self, *a):
+        """首页快捷操作里的搜索：一次搜「房屋」和「租客」，点结果直接进详情"""
+        self.store.load()
+        p = Popup(title="搜索", title_size=sp(16), size_hint=(0.94, 0.86), auto_dismiss=True)
+        root = BoxLayout(orientation="vertical", spacing=dp(6),
+                         padding=[dp(8), dp(8), dp(8), dp(8)])
+        ti = mk_input("房间号 / 地址 / 租客姓名 / 电话", "")
+        ti.height = dp(46)
+        root.add_widget(ti)
+
+        res = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(4))
+        res.bind(minimum_height=res.setter("height"))
+        sv = ScrollView(do_scroll_x=False)
+        sv.add_widget(res)
+        root.add_widget(sv)
+
+        bar = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
+        b_house = Button(text="在房屋页查看", font_size=sp(14), background_color=C_ACCENT,
+                         color=(1, 1, 1, 1))
+        b_close = Button(text="关闭", font_size=sp(14), background_color=BTN_NEUTRAL_C,
+                         color=(1, 1, 1, 1))
+        bar.add_widget(b_house)
+        bar.add_widget(b_close)
+        root.add_widget(bar)
+
+        def jump_houses(*_):
+            p.dismiss()
+            self.goto_houses_with(ti.text or "")
+
+        def render(*_):
+            key = (ti.text or "").strip()
+            res.clear_widgets()
+            if not key:
+                tip = Label(text="输入关键词自动搜索。\n支持空格分隔多个词，如「张三 138」。",
+                            font_size=sp(12), color=C_MUTED, halign="left", valign="top",
+                            size_hint_y=None, height=dp(50))
+                tip.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
+                res.add_widget(tip)
+                return
+            hits_h, hits_t = [], []
+            for h in sorted(self.store.houses(), key=room_key):
+                if self.match_tokens(self.house_haystack(h), key):
+                    hits_h.append(h)
+            for t in self.store.data.get("tenants", []):
+                hay = " ".join([str(t.get("name", "")), str(t.get("tel", "")),
+                                str(t.get("room", "")), str(t.get("rent_type", ""))]).lower()
+                if self.match_tokens(hay, key):
+                    hits_t.append(t)
+            if not hits_h and not hits_t:
+                none = Label(text="没有找到匹配的结果", font_size=sp(13), color=C_MUTED,
+                             size_hint_y=None, height=dp(40))
+                res.add_widget(none)
+                return
+
+            head = Label(text="房屋 %d 套" % len(hits_h), font_size=sp(12), color=C_PRIMARY,
+                         halign="left", size_hint_y=None, height=dp(24))
+            head.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
+            res.add_widget(head)
+            for h in hits_h[:30]:
+                room = str(h.get("room", ""))
+                t = self.store.current_tenant(room)
+                sub = "%s · %s元/月 · %s" % (
+                    h.get("address", ""), h.get("price", ""),
+                    ("租客 %s" % t.get("name", "")) if t else "空闲")
+                res.add_widget(self._search_row(
+                    "房间 %s  %s" % (room, h.get("status", "")), sub,
+                    lambda inst, r=room: (p.dismiss(), self.open_detail(r))))
+
+            head2 = Label(text="租客 %d 人" % len(hits_t), font_size=sp(12), color=C_PRIMARY,
+                          halign="left", size_hint_y=None, height=dp(24))
+            head2.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
+            res.add_widget(head2)
+            for t in hits_t[:30]:
+                room = str(t.get("room", ""))
+                sub = "房间 %s · %s · 入住 %s" % (room, t.get("rent_type", ""), t.get("in_date", ""))
+                res.add_widget(self._search_row(
+                    "%s  %s" % (t.get("name", ""), t.get("tel", "")), sub,
+                    lambda inst, r=room: (p.dismiss(), self.open_detail(r)),
+                    bg=(0.97, 0.98, 0.97, 1)))
+
+        ti.bind(text=lambda *_: render())
+        b_close.bind(on_release=lambda *_: p.dismiss())
+        b_house.bind(on_release=jump_houses)
+        render()
+        p.content = root
+        p.open()
+
+    def goto_houses_with(self, key):
+        """带着关键词跳到房屋页（先把词写进输入框，再刷新，顺序不能反）"""
+        self.search_key = key or ""
+        try:
+            ti = self.sm.get_screen("houses").ids.search
+            if ti.text != self.search_key:
+                ti.text = self.search_key
+        except Exception:
+            pass
+        self.go("houses")
+        self.refresh_houses()
+
+    def on_search_change(self, text):
+        """房屋页输入框变化即过滤（原来只有按回车才触发，用户以为搜索没反应）"""
+        self.search_key = text or ""
+        self.refresh_houses()
+
+    def search_from_input(self, *a):
+        """「搜索」按键：显式从输入框取值再过滤，不依赖 kv 的 on_text 绑定"""
+        try:
+            self.search_key = self.sm.get_screen("houses").ids.search.text or ""
+        except Exception:
+            pass
+        self.refresh_houses()
+
+    def clear_search(self, *a):
+        self.goto_houses_with("")
+
+    # ---------------------------------------------------------- 统计导出
+    def stat_range_label(self):
+        return ("%s 年" % self.stat_year) if self.stat_mode == "按年" else self.stat_ym
+
+    def stat_range_prefix(self):
+        return str(self.stat_year) if self.stat_mode == "按年" else str(self.stat_ym)
+
+    def export_stats(self, *a):
+        """导出当前统计区间的汇总 + 明细流水为 CSV（Excel 直接可开）"""
+        if not self.need_paid("导出统计报表"):
+            return
+        self.store.load()
+        import csv as _csv
+        prefix = self.stat_range_prefix()
+        label = self.stat_range_label()
+        data = (self.store.stats_year(self.stat_year) if self.stat_mode == "按年"
+                else self.store.stats(self.stat_ym))
+        # 同 build_home：标签与数据键要一一对应（按年时「年租合计」取「月租合计」）。
+        # 这里刻意不写嵌套三元——括号一多就容易漏，分开赋值最稳。
+        base_keys = ["总房间", "已租", "空闲", "已收押金", "月租合计",
+                     "已收租金", "未收租金", "已收电费", "已收水费", "当月总收费"]
+        if self.stat_mode == "按年":
+            pairs = list(zip(["总房间", "已租", "空闲", "已收押金", "年租合计",
+                              "已收租金", "未收租金", "已收电费", "已收水费", "当年总收费"],
+                             base_keys))
+        else:
+            pairs = [(k, k) for k in base_keys]
+        pays, utils = self.store.range_records(prefix)
+
+        buf = io.StringIO()
+        w = _csv.writer(buf)
+        w.writerow(["统计区间", label])
+        w.writerow([])
+        w.writerow(["指标", "数值"])
+        for lab, dk in pairs:
+            w.writerow([lab, data.get(dk, "0")])
+        w.writerow([])
+        w.writerow(["【收租明细】共 %d 笔" % len(pays)])
+        w.writerow(["房间号", "租客", "金额(元)", "日期"])
+        for p in pays:
+            w.writerow([str(p.get("room", "")), str(p.get("name", "")),
+                        str(p.get("money", "")), str(p.get("date", ""))])
+        w.writerow([])
+        w.writerow(["【水电明细】共 %d 笔" % len(utils)])
+        w.writerow(["房间号", "月份", "电费(元)", "水费(元)"])
+        for u in utils:
+            w.writerow([str(u.get("room", "")), str(u.get("month", "")),
+                        str(u.get("elec", "")), str(u.get("water", ""))])
+        # BOM：不加 Excel 打开中文全是乱码
+        out = "\ufeff" + buf.getvalue()
+        name = "统计_%s.csv" % (label.replace(" ", "").replace("-", ""))
+        path = self._write_public(name, out)
+        if path:
+            info_popup("导出成功",
+                       "「%s」的统计数据已保存到：\n%s\n\n"
+                       "汇总 10 项 · 收租 %d 笔 · 水电 %d 笔，\n用 Excel / WPS 打开即可。"
+                       % (label, path, len(pays), len(utils)))
+        else:
+            self.toast("导出失败：没有可写的存储目录")
 
     def _section(self, title, right=""):
         row = BoxLayout(size_hint_y=None, height=dp(34))
@@ -811,10 +1854,9 @@ class BaozupoApp(App):
             return
         self.store.load()
         scr = self.sm.get_screen("houses")
-        try:
-            self.search_key = scr.ids.search.text
-        except Exception:
-            pass
+        # 搜索词以 self.search_key 为准，不再从输入框回读：
+        # 旧实现每次都 ti.text -> search_key，会把程序设置的关键词（如首页搜索带过来的）
+        # 直接覆盖掉，表现为「点了搜索但列表没变」。输入框那边由 on_text 回调负责同步进来。
         key = (self.search_key or "").strip().lower()
         filt = self.filter_status
         rows = []
@@ -825,35 +1867,40 @@ class BaozupoApp(App):
             if filt != "全部" and st != filt:
                 continue
             t = self.store.current_tenant(room)
-            pf = " ".join([room, str(h.get("address", "")), st,
-                           str(h.get("area", "")), str(h.get("price", "")),
-                           (t or {}).get("name", ""), (t or {}).get("tel", "")]).lower()
-            if key and key not in pf:
+            # 原来只能整串匹配（"张三 138" 搜不到），现在支持空格分词 + 全字段（含配套）
+            if not self.match_tokens(self.house_haystack(h), key):
                 continue
             rented = (st == "已租")
             fac = "厨:%s  卫:%s  阳台:%s" % (h.get("kitchen", "无"), h.get("toilet", "无"),
                                             h.get("balcony", "无"))
+            line3, line4 = "", ""
             if rented and t:
                 line2 = "租客 %s  %s" % (t.get("name", ""), t.get("tel", ""))
-                line3 = "入住 %s → 到期 %s  押金 %s元" % (
-                    t.get("in_date", ""), t.get("out_date", ""), t.get("deposit", "0"))
+                # ★ 原来「入住 + 到期 + 押金 + 最近收租」全挤一行，手机窄屏放不下会被截断，
+                #   现在拆成两行，各字段都完整可见
+                line3 = "入住 %s → 到期 %s" % (t.get("in_date", ""), t.get("out_date", ""))
+                line4 = "押金 %s元" % t.get("deposit", "0")
             elif rented:
-                line2, line3 = "已租（无租客记录）", ""
+                line2 = "已租（无租客记录）"
             else:
-                line2, line3 = "空闲中 · 点击下方「租客」登记入住", ""
+                line2 = "空闲中 · 点击下方「租客」登记入住"
             pays = self.store.pays_of(room)
             if pays:
-                line3 = (line3 + "   最近收租 " + str(pays[-1].get("date", ""))).strip()
+                line4 = (line4 + "   最近收租 " + str(pays[-1].get("date", ""))).strip()
             rows.append({
                 "room": room, "address": str(h.get("address", "")), "status": st,
+                "has_tenant": bool(t),
                 "line1": "%s㎡ · %s元/月 · %s" % (h.get("area", ""), h.get("price", ""), fac),
-                "line2": line2, "line3": line3,
+                "line2": line2, "line3": line3, "line4": line4,
                 "tag_bg": list(C_ACCENT) if rented else [0.61, 0.67, 0.65, 1],
                 "card_bg": [1, 1, 1, 1],
             })
         rv = scr.ids.rv
         rv.data = rows
-        scr.ids.count.text = "共 %d 套（筛选：%s）" % (len(rows), filt)
+        tip = "共 %d 套（状态：%s）" % (len(rows), filt)
+        if key:
+            tip += "  搜索「%s」" % (self.search_key or "").strip()
+        scr.ids.count.text = tip
         if not rows:
             rv.data = []
 
@@ -909,10 +1956,10 @@ class BaozupoApp(App):
             {"key": "pick", "label": "已有小区快速带入（选填）", "kind": "combo",
              "values": ["不选择"] + addrs, "value": "不选择", "on_change": fill_by_addr},
             {"key": "room", "label": "房间号", "kind": "text", "value": base["room"],
-             "readonly": (mode == "edit"), "half": True},
-            {"key": "area", "label": "面积㎡（只填数字）", "kind": "text",
+             "half": True},
+            {"key": "area", "label": "面积（㎡）", "kind": "text",
              "value": base["area"], "half": True},
-            {"key": "price", "label": "月租金元（只填数字）", "kind": "text",
+            {"key": "price", "label": "月租金（元）", "kind": "text",
              "value": base["price"], "half": True},
             {"key": "status", "label": "状态", "kind": "combo", "values": ["空闲", "已租"],
              "value": base["status"], "half": True},
@@ -951,12 +1998,33 @@ class BaozupoApp(App):
                 if not h:
                     self.toast("找不到该房间")
                     return False
+                # ★ 房间号可修改：改号时先查重，再把它名下所有关联记录一起迁移
+                if str(room_no) != str(room):
+                    if self.store.find_house(room_no):
+                        self.toast("房间号「%s」已被占用，请换一个" % room_no)
+                        return False
+                    old_no = str(room)
+                    for t in self.store.data["tenants"]:
+                        if str(t.get("room")) == old_no:
+                            t["room"] = room_no
+                    for p in self.store.data["payments"]:
+                        if str(p.get("room")) == old_no:
+                            p["room"] = room_no
+                    for u in self.store.data["utilities"]:
+                        if str(u.get("room")) == old_no:
+                            u["room"] = room_no
+                    h["room"] = room_no
                 h.update({"address": addr, "area": area, "price": price,
                           "kitchen": v.get("kitchen", "无"), "toilet": v.get("toilet", "无"),
                           "balcony": v.get("balcony", "无"), "status": v.get("status", "空闲")})
             self.store.save()
             self.refresh_houses()
-            self.toast("保存成功" if mode == "add" else "房间「%s」已修改" % room)
+            if mode == "add":
+                self.toast("保存成功")
+            elif str(room_no) != str(room):
+                self.toast("房间号已由「%s」改为「%s」" % (room, room_no))
+            else:
+                self.toast("房间「%s」已修改" % room_no)
             return True
 
         FormDialog("添加新房" if mode == "add" else "修改房屋 - %s" % room,
@@ -965,7 +2033,8 @@ class BaozupoApp(App):
     # ------------- 单套房子的各种操作 -------------
     def house_action(self, action, room):
         fn = {"tenant": self.open_tenant_form, "pay": self.open_pay_form,
-              "util": self.open_util_form, "more": self.open_more_menu}.get(action)
+              "util": self.open_util_form, "more": self.open_more_menu,
+              "meter": self.open_meter_menu}.get(action)
         if fn:
             fn(room)
 
@@ -974,6 +2043,9 @@ class BaozupoApp(App):
         items = [
             ("查看详情", lambda: self.open_detail(room)),
             ("修改房屋", lambda: self.open_house_form("edit", room)),
+            ("房间租客（可加多人）", lambda: self.open_room_tenants(room)),
+            ("智能水电表 · 扫码抄表", lambda: self.open_meter_menu(room)),
+            ("缴费二维码（分享给租客）", lambda: self.open_bill_qr(room)),
             ("以此为模板新增同款房", lambda: self.open_house_form("add")),
             ("设置该租客提醒天数", lambda: self.open_warn_setting(
                 self.store.current_tenant(room))),
@@ -990,6 +2062,55 @@ class BaozupoApp(App):
             box.add_widget(b)
         p.content = box
         p.open()
+
+    # ------------------------------------------------------------------ 导出
+    def _write_public(self, name, content):
+        """把文本写到手机可访问的公共目录，返回保存路径；全失败返回 None。"""
+        for d in public_dirs():
+            try:
+                path = os.path.join(d, name)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(content)
+                return path
+            except Exception:
+                continue
+        return None
+
+    def export_tenants_csv(self, *a):
+        """导出全部租客（含历史）为 CSV，Excel/WPS 可直接打开。"""
+        if not self.need_paid("导出租客名单"):
+            return
+        self.store.load()
+        import csv as _csv
+        buf = io.StringIO()
+        w = _csv.writer(buf)
+        w.writerow(["房间号", "姓名", "电话", "入住日期", "到期日期", "租期",
+                    "押金(元)", "状态", "剩余天数"])
+        ts = self.store.data.get("tenants", [])
+        try:
+            ts = sorted(ts, key=lambda x: room_key(x.get("room", "")))
+        except Exception:
+            pass
+        for t in ts:
+            left = ""
+            try:
+                d = datetime.strptime(t.get("out_date", ""), "%Y-%m-%d").date()
+                left = str((d - datetime.now().date()).days)
+            except Exception:
+                pass
+            w.writerow([str(t.get("room", "")), str(t.get("name", "")), str(t.get("tel", "")),
+                        str(t.get("in_date", "")), str(t.get("out_date", "")),
+                        str(t.get("rent_type", "")), str(t.get("deposit", "0")),
+                        "已退租" if t.get("is_leave", False) else "在租", left])
+        # BOM：不加的话 Excel 打开中文全是乱码
+        data = "\ufeff" + buf.getvalue()
+        name = "租客名单_%s.csv" % datetime.now().strftime("%Y%m%d_%H%M")
+        path = self._write_public(name, data)
+        if path:
+            info_popup("导出成功", "租客名单已保存到：\n%s\n\n共 %d 条记录，"
+                                   "用 Excel / WPS 打开即可。" % (path, len(ts)))
+        else:
+            self.toast("导出失败：没有可写的存储目录")
 
     def open_detail(self, room):
         self.store.load()
@@ -1029,38 +2150,78 @@ class BaozupoApp(App):
             lines.append("（暂无）")
         for u in us:
             lines.append("· %s  电费 %s元  水费 %s元" % (u.get("month", ""), u.get("elec", ""), u.get("water", "")))
-        info_popup("%s · 房间详情" % room, "\n".join(lines))
 
-    def open_tenant_form(self, room):
+        def do_export():
+            if not self.need_paid("导出房间详情"):
+                return
+            name = "房间%s_详情_%s.txt" % (room.replace("/", "-"),
+                                          datetime.now().strftime("%Y%m%d_%H%M"))
+            path = self._write_public(name, "\n".join(lines))
+            if path:
+                info_popup("导出成功", "「%s」的详情已保存到：\n%s" % (room, path))
+            else:
+                self.toast("导出失败：没有可写的存储目录")
+
+        info_popup("%s · 房间详情" % room, "\n".join(lines),
+                   extra_btn=(("导出为 TXT" if self.store.paid else "导出为 TXT（付费版）"),
+                              do_export))
+
+    def open_tenant_form(self, room, tenant=None):
+        """租客登记 / 修改。
+
+        tenant=None 表示「再添一位同住人」，给了 tenant 就是改这个人。
+        一间房允许登记多个租客（合租），主租客用 is_main 标记。
+        """
         self.store.load()
         h = self.store.find_house(room)
         if not h:
             self.toast("找不到该房间")
             return
-        t = self.store.current_tenant(room)
-        base = {"name": "", "tel": "", "in_date": today_str(), "rent_type": "月租", "deposit": ""}
-        if t:
-            base.update({"name": str(t.get("name", "")), "tel": str(t.get("tel", "")),
-                         "in_date": str(t.get("in_date", today_str())),
-                         "rent_type": str(t.get("rent_type", "月租")),
-                         "deposit": str(t.get("deposit", ""))})
+        live = self.store.active_tenants(room)
+        base = {"name": "", "tel": "", "idcard": "", "in_date": today_str(),
+                "rent_type": "月租", "deposit": ""}
+        if tenant is not None:
+            base.update({"name": str(tenant.get("name", "")),
+                         "tel": str(tenant.get("tel", "")),
+                         "idcard": str(tenant.get("idcard", "")),
+                         "in_date": str(tenant.get("in_date", today_str())),
+                         "rent_type": str(tenant.get("rent_type", "月租")),
+                         "deposit": str(tenant.get("deposit", ""))})
+        elif live:
+            # 新增同住人：入住日期 / 租期默认跟主租客走，少敲几下
+            m = self.store.current_tenant(room) or live[0]
+            base.update({"in_date": str(m.get("in_date", today_str())),
+                         "rent_type": str(m.get("rent_type", "月租")),
+                         "deposit": str(m.get("deposit", ""))})
 
         fields = [
-            {"key": "name", "label": "租客姓名", "kind": "text", "value": base["name"], "half": True},
-            {"key": "tel", "label": "联系电话", "kind": "text", "value": base["tel"], "half": True},
-            {"key": "in_date", "label": "入住日期 YYYY-MM-DD", "kind": "text",
-             "value": base["in_date"], "half": True},
+            {"key": "name", "label": "租客姓名", "kind": "text", "value": base["name"],
+             "hint": "必填", "half": True},
+            {"key": "tel", "label": "联系电话", "kind": "text", "value": base["tel"],
+             "hint": "必填，登记后可直接拨打", "half": True},
+            {"key": "idcard", "label": "身份证号", "kind": "text",
+             "value": base["idcard"], "hint": "18 位，选填但建议登记"},
+            {"key": "in_date", "label": "入住日期", "kind": "text",
+             "value": base["in_date"], "hint": "YYYY-MM-DD", "half": True},
             {"key": "rent_type", "label": "租期类型", "kind": "combo", "values": ["月租", "年租"],
              "value": base["rent_type"], "half": True},
-            {"key": "deposit", "label": "押金（元）", "kind": "text", "value": base["deposit"], "half": True},
+            {"key": "deposit", "label": "押金（元）", "kind": "text", "value": base["deposit"],
+             "hint": "只填数字", "half": True},
         ]
 
         def submit(v):
-            name, tel = v.get("name", ""), v.get("tel", "")
-            ind, dep = v.get("in_date", ""), v.get("deposit", "")
+            name = v.get("name", "").strip()
+            tel = v.get("tel", "").strip()
+            idc = v.get("idcard", "").strip()
+            ind = v.get("in_date", "").strip()
+            dep = v.get("deposit", "").strip()
             rt = v.get("rent_type", "月租")
             if not name or not tel or not ind or not dep:
                 self.toast("请把信息填写完整")
+                return False
+            ok, why = check_idcard(idc)
+            if not ok:
+                self.toast("身份证号不对：\n%s" % why)
                 return False
             if not is_number(dep):
                 self.toast("押金必须是数字")
@@ -1072,40 +2233,273 @@ class BaozupoApp(App):
                 return False
             out = calc_end_date(ind, rt)
             self.store.load()
-            cur = self.store.current_tenant(room)
-            if cur:
-                cur.update({"name": name, "tel": tel, "in_date": ind, "out_date": out,
+            if tenant is not None:
+                # load() 之后旧 dict 已经失效了，必须按 tid 把人找回来再改，
+                # 否则改的是内存里的孤儿对象，存盘后什么都没变（表现为「改了没生效」）
+                tgt = self.store.tenant_by_id(tenant.get("tid")) or tenant
+                tgt.update({"name": name, "tel": tel, "idcard": idc,
+                            "in_date": ind, "out_date": out,
                             "rent_type": rt, "deposit": dep})
+                tip = "已更新「%s」的登记信息" % name
             else:
-                for old in self.store.tenants_of(room):
-                    if not old.get("is_leave", False):
-                        old["is_leave"] = True
-                        old["leave_date"] = today_str()
                 self.store.data["tenants"].append({
-                    "name": name, "tel": tel, "room": room, "in_date": ind, "out_date": out,
-                    "rent_type": rt, "deposit": dep,
+                    "tid": self.store.new_tid(),
+                    "name": name, "tel": tel, "idcard": idc, "room": room,
+                    "in_date": ind, "out_date": out, "rent_type": rt, "deposit": dep,
                     "month_advance": self.store.settings.get("month_advance", 1),
                     "year_advance": self.store.settings.get("year_advance", 7),
+                    # 该房第一个登记的人自动成为主租客
+                    "is_main": not self.store.active_tenants(room),
                     "is_leave": False})
+                tip = "已添加租客 %s\n到期日期：%s" % (name, out)
             hh = self.store.find_house(room)
             if hh:
                 hh["status"] = "已租"
             self.store.save()
             self.refresh_houses()
-            self.toast("保存成功\n到期日期：%s" % out)
+            self.refresh_tenants()
+            self.toast(tip)
+            # 合租场景：存完直接回「房间租客」列表，方便接着加下一个人
+            Clock.schedule_once(lambda *_: self.open_room_tenants(room), 0.4)
             return True
 
-        FormDialog("租客登记 - %s" % room, fields, submit).open()
+        if tenant is not None:
+            title = "修改租客 - %s" % room
+        elif live:
+            title = "添加同住人 - %s" % room
+        else:
+            title = "租客登记 - %s" % room
+        FormDialog(title, fields, submit).open()
+
+    # ------------------------------------------------- 一间房多个租客
+    def _card_box(self, height, bg=(1, 1, 1, 1), spacing=dp(4), padding=dp(8)):
+        """带圆角白底的卡片容器（弹窗是深灰底，白卡片才看得清层次）"""
+        from kivy.graphics import Color, RoundedRectangle
+        box = BoxLayout(orientation="vertical", size_hint_y=None, height=height,
+                        spacing=spacing, padding=[padding, padding, padding, padding])
+        with box.canvas.before:
+            Color(*bg)
+            rect = RoundedRectangle(radius=[dp(8)])
+
+        def sync(w, *_):
+            rect.pos = w.pos
+            rect.size = w.size
+        box.bind(pos=sync, size=sync)
+        sync(box)
+        return box
+
+    def _mini_title(self, text):
+        lab = Label(text=text, size_hint_y=None, height=dp(22), font_size=sp(12),
+                    color=POPUP_LABEL_C, halign="left", valign="middle")
+        lab.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
+        return lab
+
+    def _tenant_row(self, room, t, popup):
+        """租客管理里的一行：姓名 / 电话 / 身份证 + 拨打·编辑·退租·设主租客"""
+        card = self._card_box(dp(126), spacing=dp(2), padding=dp(8))
+
+        head = BoxLayout(size_hint_y=None, height=dp(24), spacing=dp(6))
+        name_lab = Label(text=str(t.get("name", "")), font_size=sp(15), color=C_TEXT,
+                         halign="left", valign="middle", shorten=True)
+        name_lab.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
+        head.add_widget(name_lab)
+        if t.get("is_main", False):
+            from kivy.graphics import Color, RoundedRectangle
+            tag = Label(text="主租客", font_size=sp(11), color=(1, 1, 1, 1),
+                        size_hint_x=None, width=dp(52), halign="center", valign="middle")
+            tag.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
+            # 白卡片上直接放白字会隐形，给它垫一层圆角底色
+            with tag.canvas.before:
+                Color(*C_ACCENT)
+                _rect = RoundedRectangle(radius=[dp(9)])
+
+            def _sync_tag(w, *_):
+                _rect.pos = w.pos
+                _rect.size = w.size
+            tag.bind(pos=_sync_tag, size=_sync_tag)
+            head.add_widget(tag)
+        card.add_widget(head)
+
+        for txt, fs in (("电话 %s" % t.get("tel", ""), sp(12)),
+                        ("身份证 %s" % (t.get("idcard", "") or "未登记"), sp(11))):
+            lab = Label(text=txt, size_hint_y=None, height=dp(20), font_size=fs,
+                        color=C_MUTED, halign="left", valign="middle", shorten=True)
+            lab.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
+            card.add_widget(lab)
+
+        bar = BoxLayout(size_hint_y=None, height=dp(38), spacing=dp(5))
+        b_dial = Button(text="拨打", font_size=sp(12), background_color=C_INFO,
+                        color=(1, 1, 1, 1))
+        b_dial.bind(on_release=lambda *_: self.dial_tel(t.get("tel", "")))
+        b_edit = Button(text="编辑", font_size=sp(12), background_color=C_ACCENT,
+                        color=(1, 1, 1, 1))
+        b_edit.bind(on_release=lambda *_: (popup.dismiss(),
+                                           self.open_tenant_form(room, t)))
+        b_leave = Button(text="退租", font_size=sp(12), background_color=C_DANGER,
+                         color=(1, 1, 1, 1))
+        b_leave.bind(on_release=lambda *_: self.evict_tenant(room, t, popup))
+        bar.add_widget(b_dial)
+        bar.add_widget(b_edit)
+        bar.add_widget(b_leave)
+        if not t.get("is_main", False):
+            b_main = Button(text="设为主", font_size=sp(12),
+                            background_color=BTN_NEUTRAL_C, color=(1, 1, 1, 1))
+            b_main.bind(on_release=lambda *_: self.set_main_tenant(room, t, popup))
+            bar.add_widget(b_main)
+        card.add_widget(bar)
+        return card
+
+    def open_room_tenants(self, room):
+        """房间租客管理：列出这间房所有在租租客，可加人 / 改 / 打 / 退租"""
+        self.store.load()
+        h = self.store.find_house(room)
+        if not h:
+            self.toast("找不到该房间")
+            return
+        live = self.store.active_tenants(room)
+        hist = [t for t in self.store.tenants_of(room) if t.get("is_leave", False)]
+
+        box = BoxLayout(orientation="vertical", spacing=dp(6), padding=dp(8))
+        body = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(6))
+        body.bind(minimum_height=body.setter("height"))
+        body.add_widget(self._mini_title("在租 %d 人" % len(live)))
+        if not live:
+            body.add_widget(self._mini_title("（还没登记租客，点下面「添加租客」）"))
+        p = Popup(title="%s · 租客" % room, title_size=sp(16),
+                  size_hint=(0.94, 0.82), auto_dismiss=True)
+        for t in live:
+            body.add_widget(self._tenant_row(room, t, p))
+        if hist:
+            body.add_widget(self._mini_title("历史租客 %d 人" % len(hist)))
+            for t in hist:
+                lab = Label(text="%s  %s  %s ~ %s（已退租）" % (
+                    t.get("name", ""), t.get("tel", ""), t.get("in_date", ""),
+                    t.get("leave_date", "")), size_hint_y=None, height=dp(22),
+                    font_size=sp(11), color=(0.75, 0.78, 0.77, 1),
+                    halign="left", valign="middle", shorten=True)
+                lab.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
+                body.add_widget(lab)
+        sv = ScrollView(do_scroll_x=False)
+        sv.add_widget(body)
+        box.add_widget(sv)
+
+        bar = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
+        b_add = Button(text="＋ 添加租客", font_size=sp(15),
+                       background_color=C_ACCENT, color=(1, 1, 1, 1))
+        b_add.bind(on_release=lambda *_: (p.dismiss(),
+                                          self.open_tenant_form(room, None)))
+        b_close = Button(text="关闭", font_size=sp(15), background_color=BTN_NEUTRAL_C,
+                         color=(1, 1, 1, 1))
+        b_close.bind(on_release=lambda *_: p.dismiss())
+        bar.add_widget(b_add)
+        bar.add_widget(b_close)
+        box.add_widget(bar)
+        p.content = box
+        p.open()
+
+    def set_main_tenant(self, room, t, popup=None):
+        """把某人设为主租客（收租/水电默认挂在他名下）"""
+        tid = str(t.get("tid", ""))
+        self.store.load()
+        for x in self.store.active_tenants(room):
+            x["is_main"] = (str(x.get("tid", "")) == tid)
+        self.store.save()
+        self.refresh_tenants()
+        if popup:
+            popup.dismiss()
+        self.toast("「%s」已设为主租客" % t.get("name", ""))
+        Clock.schedule_once(lambda *_: self.open_room_tenants(room), 0.3)
+
+    def evict_tenant(self, room, t, popup=None):
+        """单个租客退租：房间里还有人就不动房间状态，全退完才置为空闲"""
+
+        tid = str(t.get("tid", ""))
+
+        def yes():
+            self.store.load()
+            # load() 会把租户列表读成新 dict，这里按 tid 重新定位，改到真正的那条上
+            tgt = self.store.tenant_by_id(tid) or t
+            tgt["is_leave"] = True
+            tgt["leave_date"] = today_str()
+            if not self.store.active_tenants(room):
+                hh = self.store.find_house(room)
+                if hh:
+                    hh["status"] = "空闲"
+            self.store.save()
+            self.refresh_houses()
+            self.refresh_tenants()
+            self.toast("「%s」已退租" % t.get("name", ""))
+            if popup:
+                popup.dismiss()
+        confirm_popup("退租", "确定让「%s」（%s）退租吗？\n"
+                              "该租客会被标记为已退租，房间里的其他人不受影响。"
+                      % (t.get("name", ""), room), yes, yes_text="确定退租", danger=True)
+
+    def dial_tel(self, tel):
+        """电话直拨（安卓上直接呼出，没 CALL_PHONE 权限就退化为打开拨号盘）"""
+        num = re.sub(r"\D", "", str(tel or ""))
+        if not num:
+            self.toast("这位租客还没登记电话")
+            return
+        if not android_bridge or not android_bridge.ANDROID:
+            self.toast("电脑上不能拨号\n号码：%s" % num)
+            return
+        ok, how = android_bridge.dial(num)
+        if ok:
+            self.toast(("正在拨打 %s" % num) if how == "call"
+                       else "已打开拨号盘：%s\n（没授予通话权限，点一下即可拨出）" % num)
+        else:
+            self.toast("拨号失败：%s" % how)
+
+    def require_tenant(self, room, action="缴费"):
+        """取该房当前在租的租客。
+
+        空闲房（或状态是「已租」但没登记过租客）——不能收费/记水电，
+        因为没租客就没法把这笔账挂到谁头上。这里统一拦下来并引导去登记。
+        返回租客 dict；没有则返回 None。
+        """
+        self.store.load()
+        t = self.store.current_tenant(room)
+        if t:
+            return t
+        box = {}
+
+        def go_regist():
+            if box.get("p"):
+                box["p"].dismiss()
+            self.open_tenant_form(room)
+
+        box["p"] = info_popup(
+            "请添加租客",
+            "「%s」现在没有在租的租客，无法%s。\n\n"
+            "请先在「租客登记」里把租客姓名、电话、\n"
+            "入住日期、押金登记好，之后就能%s了。" % (room, action, action),
+            btn="知道了", extra_btn=("去登记租客", go_regist))
+        return None
 
     def open_pay_form(self, room):
         self.store.load()
-        t = self.store.current_tenant(room)
+        # ★ 空闲房不允许收租：没有租客就先引导去登记，不再直接进表单
+        t = self.require_tenant(room, "收租")
+        if not t:
+            return
         h = self.store.find_house(room)
         suggest = str(h.get("price", "")) if h else ""
+        # 本月已收过就在标题上先预警，别等提交才说
+        this_month = datetime.now().strftime("%Y-%m")
+        paid_this_month = [p for p in self.store.pays_of(room)
+                           if str(p.get("date", ""))[:7] == this_month]
+        who = "%s  %s" % (t.get("name", ""), t.get("tel", ""))
         fields = [
-            {"key": "money", "label": "缴费金额", "kind": "text", "value": suggest, "hint": "元"},
-            {"key": "date", "label": "缴费日期", "kind": "text", "value": today_str(), "hint": "YYYY-MM-DD"},
+            {"key": "who", "label": "租客（自动带入）", "kind": "text",
+             "value": who.strip(), "readonly": True},
+            {"key": "money", "label": "缴费金额", "kind": "text", "value": suggest,
+             "hint": "元", "half": True},
+            {"key": "date", "label": "缴费日期", "kind": "text", "value": today_str(),
+             "hint": "YYYY-MM-DD", "half": True},
         ]
+        title = "房租缴费 - %s (%s)%s" % (
+            room, t.get("name", ""), "  ·本月已收" if paid_this_month else "")
 
         def submit(v):
             money, date = v.get("money", ""), v.get("date", "")
@@ -1117,27 +2511,64 @@ class BaozupoApp(App):
             except Exception:
                 self.toast("日期格式应为 YYYY-MM-DD")
                 return False
-            self.store.load()
-            self.store.data["payments"].append({
-                "room": room, "name": (self.store.current_tenant(room) or {}).get("name", "未知"),
-                "money": money, "date": date})
-            self.store.save()
-            self.refresh_houses()
-            self.toast("收租成功：%s 元" % money)
+
+            def do_add():
+                self.store.load()
+                # 用表单打开那一刻带出来的租客，避免中途又被改成别的人
+                cur = self.store.current_tenant(room) or {}
+                self.store.data["payments"].append({
+                    "room": room,
+                    "name": cur.get("name") or t.get("name", "未知"),
+                    "tel": cur.get("tel") or t.get("tel", ""),
+                    "money": money, "date": date})
+                self.store.save()
+                self.refresh_houses()
+                if dup:
+                    self.toast("已补记：%s %s 元\n（该月原来已收 %s 元）"
+                               % (date, money, "、".join(str(p.get("money", "")) for p in dup)))
+                else:
+                    self.toast("收租成功：%s 元" % money)
+                dlg.dismiss()
+
+            # 同月重复收租：明确告知上次金额/日期，要确认才入账（防手抖记两笔）
+            dup = [p for p in self.store.pays_of(room)
+                   if str(p.get("date", ""))[:7] == date[:7]]
+            if dup:
+                confirm_popup(
+                    "重复收租？",
+                    "「%s」在 %s 已经记过 %d 笔：\n%s\n\n"
+                    "现在还要再记 %s 元（%s）吗？\n"
+                    "（如果是补差价 / 分批收，点「仍然记录」；\n  手滑了就点「取消」）"
+                    % (room, date[:7], len(dup),
+                       "\n".join("· %s  %s元" % (p.get("date", ""), p.get("money", "")) for p in dup),
+                       money, date),
+                    lambda: do_add(), yes_text="仍然记录")
+                return False      # 先不关表单，等用户确认
+            do_add()
             return True
 
-        FormDialog("房租缴费 - %s%s" % (room, ("  (%s)" % t["name"]) if t else ""),
-                   fields, submit).open()
+        dlg = FormDialog(title, fields, submit)
+        dlg.open()
 
     def open_util_form(self, room):
         self.store.load()
+        # ★ 空闲房不能记水电：没有租客就没人对得上这笔账
+        t = self.require_tenant(room, "记录水电")
+        if not t:
+            return
         us = self.store.utils_of(room)
         last = us[-1] if us else {}
         fields = [
+            {"key": "who", "label": "租客（自动带入）", "kind": "text",
+             "value": ("%s  %s" % (t.get("name", ""), t.get("tel", ""))).strip(),
+             "readonly": True},
             {"key": "month", "label": "统计月份", "kind": "text",
-             "value": str(last.get("month") or datetime.now().strftime("%Y-%m")), "hint": "YYYY-MM"},
-            {"key": "elec", "label": "电费", "kind": "text", "value": str(last.get("elec", "")), "hint": "元"},
-            {"key": "water", "label": "水费", "kind": "text", "value": str(last.get("water", "")), "hint": "元"},
+             "value": str(last.get("month") or datetime.now().strftime("%Y-%m")),
+             "hint": "YYYY-MM"},
+            {"key": "elec", "label": "电费", "kind": "text", "value": str(last.get("elec", "")),
+             "hint": "元", "half": True},
+            {"key": "water", "label": "水费", "kind": "text", "value": str(last.get("water", "")),
+             "hint": "元", "half": True},
         ]
 
         def submit(v):
@@ -1153,13 +2584,599 @@ class BaozupoApp(App):
                 u for u in self.store.data["utilities"]
                 if not (str(u.get("room")) == str(room) and str(u.get("month")) == month)]
             self.store.data["utilities"].append(
-                {"room": room, "month": month, "elec": elec, "water": water})
+                {"room": room, "month": month, "elec": elec, "water": water,
+                 "name": t.get("name", ""), "tel": t.get("tel", "")})
             self.store.save()
             self.refresh_houses()
             self.toast("水电记录已保存")
             return True
 
-        FormDialog("水电记录 - %s" % room, fields, submit).open()
+        FormDialog("水电记录 - %s (%s)" % (room, t.get("name", "")), fields, submit).open()
+
+    # ==================================================== 智能水电表（扫码抄表）
+    def _row_lab(self, text, fs=sp(12), color=(0.32, 0.36, 0.35, 1), h=dp(20)):
+        """白底卡片里的一行小字（卡片是白的，所以字必须用深色）"""
+        lab = Label(text=text, size_hint_y=None, height=h, font_size=fs, color=color,
+                    halign="left", valign="middle", shorten=True)
+        lab.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
+        return lab
+
+    def _wrap_lab(self, text, fs=sp(12), color=POPUP_TEXT_C, limit=None):
+        """自动换行的说明文字：高度跟着文字行数走，不会把下面的按钮顶出去"""
+        lab = Label(text=text, size_hint_y=None, font_size=fs, color=color,
+                    halign="left", valign="top")
+        lab.bind(width=lambda w, *_: setattr(w, "text_size", (w.width, None)))
+        lab.bind(texture_size=lambda w, *_: setattr(
+            w, "height", min(w.texture_size[1], limit) if limit else w.texture_size[1]))
+        return lab
+
+    def _choice_popup(self, title, message, options):
+        """多按钮选择弹窗。options = [(按钮文字, 回调, 底色), ...]"""
+        box = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(10))
+        sv = ScrollView(do_scroll_x=False)
+        lab = self._wrap_lab(message, sp(14))
+        sv.add_widget(lab)
+        box.add_widget(sv)
+
+        p = Popup(title=title, title_size=sp(16), size_hint=(0.9, None),
+                  auto_dismiss=False)
+        for text, cb, col in options:
+            b = Button(text=text, size_hint_y=None, height=dp(44), font_size=sp(14),
+                       background_color=col, color=(1, 1, 1, 1))
+            b.bind(on_release=lambda inst, f=cb: (p.dismiss(), f()))
+            box.add_widget(b)
+        body_w = Window.width * 0.9 - dp(20)
+        body_h = text_lines_h(message, sp(14), body_w, min_h=dp(40))
+        # 标题栏 + 文案 + 按钮栏 + 内边距，留足余量
+        p.height = min(max(dp(220), body_h + dp(56) * len(options) + dp(100)),
+                       Window.height * 0.92)
+        p.content = box
+        p.open()
+        return p
+
+    def open_meter_menu(self, room):
+        """智能水电表入口：建档 / 扫码抄表 / 手抄 / 缴费二维码"""
+        self.store.load()
+        if not self.store.find_house(room):
+            self.toast("找不到该房间")
+            return
+        p = Popup(title="%s · 智能水电表" % room, title_size=sp(16),
+                  size_hint=(0.94, 0.88), auto_dismiss=True)
+        box = BoxLayout(orientation="vertical", spacing=dp(6), padding=dp(8))
+        body = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(8))
+        body.bind(minimum_height=body.setter("height"))
+        body.add_widget(self._mini_title(
+            "扫表上的二维码 / 条码 → 自动带出上次读数，算出用量和费用"))
+        for kind in ("water", "elec"):
+            body.add_widget(self._meter_row(room, kind, p))
+        sv = ScrollView(do_scroll_x=False)
+        sv.add_widget(body)
+        box.add_widget(sv)
+
+        bar = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
+        b_qr = Button(text="缴费二维码", font_size=sp(15), background_color=C_INFO,
+                      color=(1, 1, 1, 1))
+        b_qr.bind(on_release=lambda *_: (p.dismiss(),
+                                         Clock.schedule_once(
+                                             lambda *_: self.open_bill_qr(room), 0.25)))
+        b_close = Button(text="关闭", font_size=sp(15), background_color=BTN_NEUTRAL_C,
+                         color=(1, 1, 1, 1))
+        b_close.bind(on_release=lambda *_: p.dismiss())
+        bar.add_widget(b_qr)
+        bar.add_widget(b_close)
+        box.add_widget(bar)
+        p.content = box
+        p.open()
+
+    def _meter_row(self, room, kind, popup):
+        """一只表的卡片：表号 / 上次读数 / 单价 + 扫码抄表·手输·建档"""
+        m = self.store.find_meter(room, kind)
+        label = METER_LABEL.get(kind, kind)
+        unit = METER_UNIT.get(kind, "")
+        price = self.store.meter_price(kind, room)
+        card = self._card_box(dp(162), spacing=dp(3), padding=dp(9))
+
+        head = BoxLayout(size_hint_y=None, height=dp(24), spacing=dp(6))
+        head.add_widget(self._row_lab(label, sp(15), (0.13, 0.16, 0.15, 1), dp(24)))
+        head.add_widget(self._row_lab("单价 %.2f 元/%s" % (price, unit), sp(12),
+                                      C_MUTED, dp(24)))
+        card.add_widget(head)
+
+        if m:
+            no = str(m.get("no", "") or "").strip()
+            last = str(m.get("last", "") or "").strip()
+            mon = str(m.get("month", "") or "").strip()
+            bound = bool(str(m.get("qr", "") or "").strip())
+            lines = [("表号：%s" % (no or "未填"), sp(12)),
+                     ("上次读数：%s %s%s" % (last or "—", unit,
+                                          ("（%s）" % mon) if mon else ""), sp(12)),
+                     ("二维码：%s" % ("已绑定，扫一下就能抄" if bound else "未绑定"),
+                      sp(11))]
+        else:
+            lines = [("还没建档：先点「建档」把表号、单价、上次读数填一次", sp(11))]
+        for txt, fs in lines:
+            card.add_widget(self._row_lab(txt, fs, C_MUTED, dp(21)))
+
+        bar = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(5))
+        b_scan = Button(text="扫码抄表", font_size=sp(12), background_color=C_ACCENT,
+                        color=(1, 1, 1, 1))
+        b_scan.bind(on_release=lambda *_: (popup.dismiss(),
+                                           Clock.schedule_once(
+                                               lambda *_: self.open_meter_scan(room, kind), 0.25)))
+        b_man = Button(text="手输抄表", font_size=sp(12), background_color=C_INFO,
+                       color=(1, 1, 1, 1))
+        b_man.bind(on_release=lambda *_: (popup.dismiss(),
+                                          Clock.schedule_once(
+                                              lambda *_: self.open_meter_reading_form(room, kind), 0.25)))
+        b_edit = Button(text="建档 / 改表", font_size=sp(12),
+                        background_color=BTN_NEUTRAL_C, color=(1, 1, 1, 1))
+        b_edit.bind(on_release=lambda *_: (popup.dismiss(),
+                                           Clock.schedule_once(
+                                               lambda *_: self.open_meter_form(room, kind), 0.25)))
+        bar.add_widget(b_scan)
+        bar.add_widget(b_man)
+        bar.add_widget(b_edit)
+        card.add_widget(bar)
+        return card
+
+    def open_meter_form(self, room, kind):
+        """给一只水表 / 电表建档：表号、单价、上次读数、表上的二维码"""
+        self.store.load()
+        m = self.store.find_meter(room, kind) or {}
+        label = METER_LABEL.get(kind, kind)
+        unit = METER_UNIT.get(kind, "")
+        cur_price = str(m.get("price", "") or "").strip() or ("%g" % self.store.meter_price(kind, room))
+        fields = [
+            {"key": "no", "label": "表号 / 表身编号", "kind": "text",
+             "value": str(m.get("no", "") or ""), "hint": "扫不到码时靠它认表", "half": True},
+            {"key": "price", "label": "单价（元/%s）" % unit, "kind": "text",
+             "value": cur_price, "hint": "留空就用全局单价", "half": True},
+            {"key": "last", "label": "上次读数", "kind": "text",
+             "value": str(m.get("last", "") or ""), "hint": "第一次建档就填当前读数",
+             "half": True},
+            {"key": "month", "label": "上次抄表月份", "kind": "text",
+             "value": str(m.get("month", "") or "") or datetime.now().strftime("%Y-%m"),
+             "hint": "YYYY-MM", "half": True},
+            {"key": "qr", "label": "表上二维码内容", "kind": "text",
+             "value": str(m.get("qr", "") or ""),
+             "hint": "扫一次会自动填进来，也可以手动贴"},
+        ]
+
+        def submit(v):
+            no = str(v.get("no", "")).strip()
+            pr = str(v.get("price", "")).strip()
+            last = str(v.get("last", "")).strip()
+            mon = str(v.get("month", "")).strip()
+            qr = str(v.get("qr", "")).strip()
+            if pr and not is_number(pr):
+                self.toast("单价必须是数字")
+                return False
+            if last and not is_number(last):
+                self.toast("上次读数必须是数字")
+                return False
+            self.store.load()
+            self.store.set_meter(room, kind, no=no, qr=qr, last=last,
+                                 month=mon, price=pr)
+            self.store.save()
+            self.toast("%s档案已保存" % label)
+            Clock.schedule_once(lambda *_: self.open_meter_menu(room), 0.35)
+            return True
+
+        FormDialog("%s建档 - %s" % (label, room), fields, submit).open()
+
+    # --------------------------------------------------------------- 扫码
+    def _scan_popup(self, title, on_result):
+        """通用扫码弹窗：相机预览 + 每 0.4 秒识别一次。
+
+        on_result(text) 在「识别成功」或「用户点手输」时回调一次；
+        手输 / 取消 / 没扫到都给空串，调用方自己去开手输表单。
+        """
+        if not android_bridge or not android_bridge.ANDROID:
+            info_popup("电脑上不能扫码",
+                       "扫码要用手机摄像头。\n\n装到手机上后点这里就能扫表上的二维码；"
+                       "\n在电脑上先点「手输抄表」直接填读数。")
+            on_result("")
+            return None
+        if not android_bridge.camera_ready():
+            info_popup("需要相机权限",
+                       "第一次扫码要先给相机权限。\n\n刚才已经弹出授权框，点「允许」后，"
+                       "\n再回来点一次「扫码抄表」就能用了。")
+            return None
+
+        p = Popup(title=title, title_size=sp(16), size_hint=(0.95, 0.9),
+                  auto_dismiss=False)
+        box = BoxLayout(orientation="vertical", spacing=dp(6), padding=dp(8))
+        cam = None
+        try:
+            from kivy.uix.camera import Camera
+            try:
+                cam = Camera(play=True, resolution=(640, 480), index=0)
+            except Exception:
+                cam = Camera(play=True)
+        except Exception:
+            cam = None
+        if cam is not None:
+            box.add_widget(cam)
+            tip = self._mini_title("把表上的二维码 / 条码对准方框，识别到会自动跳走")
+        else:
+            tip = self._mini_title("相机打不开：可以点下面用别的扫码 App，或手输读数")
+            lab = Label(text="相机启动失败", font_size=sp(15), color=POPUP_TEXT_C,
+                        halign="center", valign="middle")
+            lab.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
+            box.add_widget(lab)
+        box.add_widget(tip)
+
+        state = {"busy": False}
+
+        def cleanup(*_):
+            try:
+                Clock.unschedule(tick)
+            except Exception:
+                pass
+            try:
+                if cam is not None:
+                    cam.play = False
+            except Exception:
+                pass
+
+        def finish(txt):
+            cleanup()
+            try:
+                p.dismiss()
+            except Exception:
+                pass
+            on_result((txt or "").strip())
+
+        def tick(dt):
+            if cam is None or state["busy"]:
+                return
+            tex = getattr(cam, "texture", None)
+            if tex is None:
+                return
+            state["busy"] = True
+
+            def work():
+                # 解码走 JNI，比较重，丢到后台线程里跑，别卡住界面
+                try:
+                    got = android_bridge.grab_texture_pixels(tex)
+                    if got:
+                        txt = android_bridge.decode_rgba(got[0], got[1], got[2])
+                        if txt:
+                            Clock.schedule_once(lambda *_: finish(txt), 0)
+                except Exception:
+                    pass
+                finally:
+                    state["busy"] = False
+
+            try:
+                import threading
+                threading.Thread(target=work, daemon=True).start()
+            except Exception:
+                state["busy"] = False
+
+        bar = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(6))
+        b_man = Button(text="手输读数", font_size=sp(13), background_color=C_ACCENT,
+                       color=(1, 1, 1, 1))
+        b_man.bind(on_release=lambda *_: finish(""))
+        b_app = Button(text="用别的 App 扫", font_size=sp(13), background_color=C_INFO,
+                       color=(1, 1, 1, 1))
+
+        def via_app(*_):
+            ok = False
+            try:
+                ok = android_bridge.scan_via_other_app(
+                    lambda txt: Clock.schedule_once(lambda *_: finish(txt or ""), 0))
+            except Exception:
+                ok = False
+            if not ok:
+                self.toast("没叫起扫码 App\n装一个「ZXing 扫码」再试，或点手输读数")
+
+        b_app.bind(on_release=via_app)
+        b_cancel = Button(text="取消", font_size=sp(13), background_color=BTN_NEUTRAL_C,
+                          color=(1, 1, 1, 1))
+        b_cancel.bind(on_release=lambda *_: (cleanup(), p.dismiss()))
+        bar.add_widget(b_man)
+        bar.add_widget(b_app)
+        bar.add_widget(b_cancel)
+        box.add_widget(bar)
+        p.bind(on_dismiss=cleanup)
+        p.content = box
+        p.open()
+        if cam is not None:
+            Clock.schedule_interval(tick, 0.4)
+        return p
+
+    def open_meter_scan(self, room, kind):
+        """扫水表 / 电表上的码"""
+        label = METER_LABEL.get(kind, kind)
+        self._scan_popup("扫%s · %s" % (label, room),
+                         lambda txt: self._on_scan_text(room, kind, txt))
+
+    def _on_scan_text(self, room, kind, txt):
+        """扫到内容后的分流：认得的表直接抄，不认的让用户决定怎么用"""
+        txt = (txt or "").strip()
+        if not txt:
+            self.open_meter_reading_form(room, kind)
+            return
+        self.store.load()
+        hit = None
+        for m in self.store.data.get("meters", []):
+            qr = str(m.get("qr", "") or "").strip()
+            no = str(m.get("no", "") or "").strip()
+            if (qr and qr == txt) or (no and no == txt):
+                hit = m
+                break
+        if hit is not None:
+            self.open_meter_reading_form(str(hit.get("room")), str(hit.get("kind")),
+                                         scanned=txt)
+            return
+        label = METER_LABEL.get(kind, kind)
+        self._choice_popup(
+            "扫到了：%s" % txt[:28],
+            "这只码还没绑到任何表上。想拿它做什么？",
+            [("绑定为 %s 的%s" % (room, label),
+              lambda: self._bind_meter_qr(room, kind, txt), C_ACCENT),
+             ("就当这次的读数填进去",
+              lambda: self.open_meter_reading_form(room, kind, scanned=txt), C_INFO),
+             ("取消", lambda: None, BTN_NEUTRAL_C)])
+
+    def _bind_meter_qr(self, room, kind, txt):
+        self.store.load()
+        self.store.set_meter(room, kind, qr=txt)
+        self.store.save()
+        self.toast("已把这只码绑到 %s 的%s\n以后扫一下就能直接抄"
+                   % (room, METER_LABEL.get(kind, kind)))
+        Clock.schedule_once(
+            lambda *_: self.open_meter_reading_form(room, kind, scanned=txt), 0.3)
+
+    # --------------------------------------------------------------- 抄表算费
+    def open_meter_reading_form(self, room, kind, scanned=""):
+        """抄表：本次读数 - 上次读数 = 用量，用量 × 单价 = 费用，直接进水电账"""
+        self.store.load()
+        t = self.store.current_tenant(room)
+        m = self.store.find_meter(room, kind) or {}
+        label = METER_LABEL.get(kind, kind)
+        unit = METER_UNIT.get(kind, "")
+        price = self.store.meter_price(kind, room)
+        month = datetime.now().strftime("%Y-%m")
+        prev = str(m.get("last", "") or "").strip()
+        prefill = str(scanned) if is_number(str(scanned or "")) else ""
+        no = str(m.get("no", "") or "").strip()
+        fields = [
+            {"key": "meter", "label": "抄哪只表（自动带入）", "kind": "text",
+             "readonly": True,
+             "value": "%s %s%s" % (room, label, ("  · 表号 %s" % no) if no else "")},
+            {"key": "month", "label": "抄表月份", "kind": "text", "value": month,
+             "hint": "YYYY-MM", "half": True},
+            {"key": "cur", "label": "本次读数（%s）" % unit, "kind": "text",
+             "value": prefill, "hint": "扫出来或手输", "half": True},
+            {"key": "prev", "label": "上次读数（%s）" % unit, "kind": "text",
+             "value": prev, "hint": "没抄过就填 0", "half": True},
+            {"key": "price", "label": "单价（元/%s）" % unit, "kind": "text",
+             "value": ("%g" % price), "half": True},
+        ]
+
+        def submit(v):
+            cur_s = str(v.get("cur", "")).strip()
+            prev_s = str(v.get("prev", "")).strip() or "0"
+            pr_s = str(v.get("price", "")).strip() or ("%g" % price)
+            mon = str(v.get("month", "")).strip() or month
+            if not cur_s or not is_number(cur_s):
+                self.toast("本次读数必须是数字")
+                return False
+            if not is_number(prev_s) or not is_number(pr_s):
+                self.toast("上次读数和单价都必须是数字")
+                return False
+            if t is None:
+                self.toast("「%s」还没登记在租租客，先登记再抄表" % room)
+                Clock.schedule_once(lambda *_: self.open_tenant_form(room), 0.3)
+                return False
+            cur, prev_n, pr = float(cur_s), float(prev_s), float(pr_s)
+            use = cur - prev_n
+            money = round(use * pr, 2)
+
+            def do_save():
+                self.store.load()
+                self.store.set_meter(room, kind, last=("%g" % cur),
+                                     month=mon, price=("%g" % pr))
+                rec = None
+                for u in self.store.data["utilities"]:
+                    if str(u.get("room")) == str(room) and str(u.get("month")) == mon:
+                        rec = u
+                        break
+                if rec is None:
+                    rec = {"room": room, "month": mon, "elec": "0", "water": "0",
+                           "name": t.get("name", ""), "tel": t.get("tel", "")}
+                    self.store.data["utilities"].append(rec)
+                # 水电账里这个月这只表的钱：以最后一次抄表为准
+                rec[kind if kind in ("water", "elec") else "water"] = "%g" % money
+                rec["name"], rec["tel"] = t.get("name", ""), t.get("tel", "")
+                self.store.save()
+                self.refresh_houses()
+                self.toast("%s抄表完成\n%s → %s %s（用量 %g %s）\n"
+                           "单价 %g 元 → 应付 %g 元"
+                           % (label, ("%g" % prev_n), ("%g" % cur), unit,
+                              use, unit, pr, money))
+                return True
+
+            if use < 0:
+                confirm_popup(
+                    "读数比上次小？",
+                    "本次 %g %s，比上次的 %g %s 还小。\n\n"
+                    "通常是抄错了，或者表换过 / 归零过。\n"
+                    "确定要按 %g 元（负数）记进水电账吗？"
+                    % (cur, unit, prev_n, unit, money),
+                    do_save, yes_text="仍然记录")
+                return False
+            return do_save()
+
+        FormDialog("%s抄表 - %s" % (label, room), fields, submit).open()
+
+    # ------------------------------------------------- 缴费二维码（生成 / 分享）
+    def _num(self, v, default=0.0):
+        try:
+            s = str(v).strip()
+            return float(s) if s else default
+        except Exception:
+            return default
+
+    def bill_info(self, room, month=None):
+        """账单数据：房租 + 这个月的水费电费"""
+        self.store.load()
+        h = self.store.find_house(room) or {}
+        t = self.store.current_tenant(room) or {}
+        mon = month or datetime.now().strftime("%Y-%m")
+        rent = self._num(h.get("price", 0))
+        water = elec = 0.0
+        for u in self.store.utils_of(room):
+            if str(u.get("month", "")) == mon:
+                water = self._num(u.get("water", 0))
+                elec = self._num(u.get("elec", 0))
+        return {"room": room, "month": mon,
+                "tenant": str(t.get("name", "") or "—"),
+                "rent": rent, "water": water, "elec": elec,
+                "total": round(rent + water + elec, 2)}
+
+    def bill_text(self, info=None, room=None, month=None):
+        """账单文本：同时用作二维码内容和分享时带的说明"""
+        if info is None:
+            info = self.bill_info(room, month)
+        return ("【%s 缴费账单】\n"
+                "房间：%s\n"
+                "租客：%s\n"
+                "账期：%s\n"
+                "房租：%.2f 元\n"
+                "水费：%.2f 元\n"
+                "电费：%.2f 元\n"
+                "合计：%.2f 元"
+                % (APP_NAME, info["room"], info["tenant"], info["month"],
+                   info["rent"], info["water"], info["elec"], info["total"]))
+
+    def qr_payload(self, info):
+        """二维码里装什么：绑过收款码就放收款码（租客扫了直接付），否则放账单文本"""
+        pay = str(self.store.settings.get("pay_qr", "") or "").strip()
+        return pay if pay else self.bill_text(info)
+
+    def _write_public_bytes(self, name, data):
+        for d in public_dirs():
+            try:
+                path = os.path.join(d, name)
+                with open(path, "wb") as f:
+                    f.write(data)
+                return path
+            except Exception:
+                continue
+        return None
+
+    def open_bill_qr(self, room, month=None):
+        """缴费二维码：画出来给租客扫，可以保存，也可以直接分享到微信"""
+        self.store.load()
+        if not qrcode_mini:
+            info_popup("二维码功能不可用",
+                       "二维码模块没加载起来。\n重新安装一次 App 就能用。")
+            return
+        info = self.bill_info(room, month)
+        payload = self.qr_payload(info)
+        try:
+            png = qrcode_mini.qr_png_bytes(payload, scale=8, border=3)
+        except Exception as _e:
+            self.toast("生成二维码失败：%r" % (_e,))
+            return
+
+        p = Popup(title="%s · 缴费二维码" % room, title_size=sp(16),
+                  size_hint=(0.94, 0.9), auto_dismiss=True)
+        box = BoxLayout(orientation="vertical", spacing=dp(6), padding=dp(8))
+        box.add_widget(self._mini_title(
+            "账期 %s · 合计 %.2f 元%s"
+            % (info["month"], info["total"],
+               "（二维码=你的收款码）" if str(
+                   self.store.settings.get("pay_qr", "") or "").strip() else "")))
+
+        try:
+            from kivy.uix.image import Image
+            from kivy.core.image import Image as CoreImage
+            buf = io.BytesIO()
+            buf.write(png)
+            buf.seek(0)
+            img = Image(texture=CoreImage(buf, ext="png").texture,
+                        size_hint=(1, 1), allow_stretch=True, keep_ratio=True)
+            box.add_widget(img)
+        except Exception as _e:
+            box.add_widget(Label(text="二维码渲染失败：\n%r" % (_e,), font_size=sp(12),
+                                 color=POPUP_TEXT_C))
+
+        sv = ScrollView(do_scroll_x=False, size_hint_y=None, height=dp(120))
+        sv.add_widget(self._wrap_lab("二维码内容：\n%s\n\n账单明细：\n%s"
+                                     % (payload, self.bill_text(info)), sp(11)))
+        box.add_widget(sv)
+
+        name = "缴费码_%s_%s.png" % (room, info["month"])
+
+        def do_share(*_):
+            path = self._write_public_bytes(name, png)
+            if not path:
+                self.toast("保存失败：没有可写的目录")
+                return
+            if android_bridge and android_bridge.ANDROID:
+                ok, how = android_bridge.share_image(path, self.bill_text(info),
+                                                     "缴费二维码")
+                if ok:
+                    self.toast("已打开分享，发给租客即可")
+                else:
+                    self.toast("分享失败：%s\n图片已存到：%s" % (how, path))
+            else:
+                info_popup("电脑上不能分享",
+                           "装到手机上就能直接发给租客。\n\n"
+                           "现在二维码图片已保存到：\n%s" % path)
+
+        def do_save(*_):
+            path = self._write_public_bytes(name, png)
+            if path:
+                self.toast("二维码已保存到：\n%s" % path)
+            else:
+                self.toast("保存失败：没有可写的目录")
+
+        def do_bind(*_):
+            p.dismiss()
+            Clock.schedule_once(
+                lambda *_: self._scan_popup("扫你的收款码",
+                                            lambda txt: self._save_pay_qr(room, txt)),
+                0.3)
+
+        bar = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(5))
+        b_share = Button(text="分享给租客", font_size=sp(13), background_color=C_ACCENT,
+                         color=(1, 1, 1, 1))
+        b_share.bind(on_release=do_share)
+        b_save = Button(text="保存到手机", font_size=sp(13), background_color=C_INFO,
+                        color=(1, 1, 1, 1))
+        b_save.bind(on_release=do_save)
+        b_pay = Button(text="绑收款码", font_size=sp(13), background_color=BTN_NEUTRAL_C,
+                       color=(1, 1, 1, 1))
+        b_pay.bind(on_release=do_bind)
+        bar.add_widget(b_share)
+        bar.add_widget(b_save)
+        bar.add_widget(b_pay)
+        box.add_widget(bar)
+
+        b_close = Button(text="关闭", size_hint_y=None, height=dp(42), font_size=sp(14),
+                         background_color=BTN_NEUTRAL_C, color=(1, 1, 1, 1))
+        b_close.bind(on_release=lambda *_: p.dismiss())
+        box.add_widget(b_close)
+        p.content = box
+        p.open()
+
+    def _save_pay_qr(self, room, txt):
+        """把扫到的微信 / 支付宝收款码存下来，以后缴费二维码直接画它"""
+        txt = (txt or "").strip()
+        if not txt:
+            self.toast("没扫到收款码，下次再试")
+            return
+        self.store.load()
+        self.store.settings["pay_qr"] = txt
+        self.store.save()
+        self.toast("收款码已保存\n以后生成的缴费二维码就是它，租客扫了直接付")
+        Clock.schedule_once(lambda *_: self.open_bill_qr(room), 0.35)
+
 
     def do_evict(self, room):
         def yes():
@@ -1196,7 +3213,7 @@ class BaozupoApp(App):
             box.add_widget(row)
 
         bar = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
-        b_no = Button(text="取消", font_size=sp(15), background_color=(0.78, 0.80, 0.79, 1),
+        b_no = Button(text="取消", font_size=sp(15), background_color=BTN_NEUTRAL_C,
                       color=(1, 1, 1, 1))
         b_yes = Button(text="确认删除", font_size=sp(15), background_color=C_DANGER, color=(1, 1, 1, 1))
         bar.add_widget(b_no)
@@ -1258,15 +3275,257 @@ class BaozupoApp(App):
                 pass
             rows.append({
                 "name": str(t.get("name", "")), "room": room,
+                "tel": str(t.get("tel", "")),
                 "line1": "%s · %s   押金 %s元" % (t.get("in_date", ""), t.get("rent_type", ""),
                                                 t.get("deposit", "0")),
-                "line2": "电话 %s   到期 %s  %s" % (t.get("tel", ""), t.get("out_date", ""), left),
+                # ★ 拆两行：原来「电话 + 到期 + 还剩」挤一行，手机窄屏会折行溢出
+                #   （Label 只有一行高度，第二行文字画到卡片外 → 看起来和别的字重叠）
+                "line2": "电话 %s" % t.get("tel", ""),
+                "line3": "到期 %s · %s" % (t.get("out_date", ""), left or "未填到期日"),
                 "tag": "已退租" if t.get("is_leave", False) else "在租",
                 "tag_bg": [0.61, 0.67, 0.65, 1] if t.get("is_leave", False) else list(C_ACCENT),
             })
         scr = self.sm.get_screen("tenants")
         scr.ids.rv.data = rows
         scr.ids.count.text = "在租 %d 人 · 历史 %d 人" % (len(live), len(hist))
+
+    # ------------------------------------------------------- 收费版 / 联系作者
+    def _img_size(self, path):
+        """读图片像素尺寸（用来按比例排版，避免拉伸变形）"""
+        try:
+            from kivy.core.image import Image as CoreImage
+            t = CoreImage(path).texture
+            if t and t.size and t.size[0]:
+                return int(t.size[0]), int(t.size[1])
+        except Exception:
+            pass
+        return 0, 0
+
+    def copy_text(self, s, tip="已复制"):
+        try:
+            Clipboard.copy(str(s))
+            self.toast(tip)
+        except Exception as e:
+            self.toast("复制失败：%s" % e)
+
+    def show_qr_popup(self, title, img_path, message, extra=None):
+        """通用「二维码图 + 说明」弹窗：图按原始比例缩放，文字可滚动，extra 追加按钮"""
+        from kivy.uix.image import Image
+        box = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
+        sv = ScrollView(do_scroll_x=False)
+        inner = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(10),
+                          padding=[0, 0, 0, dp(22)])   # 底部留白，免得末行贴着按钮栏
+        inner.bind(minimum_height=inner.setter("height"))
+
+        avail_w = Window.width * 0.94 - dp(24)
+        iw, ih = self._img_size(img_path)
+        if iw and ih:
+            img_h = avail_w * ih / float(iw)
+            # 图片最多占 0.46 屏高：留足空间给说明文字，否则最后几行会被按钮栏压住
+            max_h = Window.height * 0.46
+            if img_h > max_h:
+                img_h = max_h
+        else:
+            img_h = dp(300)
+        if os.path.exists(img_path):
+            inner.add_widget(Image(source=img_path, size_hint=(1, None), height=img_h,
+                                   fit_mode="contain"))
+        else:
+            inner.add_widget(Label(text="（二维码图片缺失：%s）" % img_path,
+                                   size_hint_y=None, height=dp(40), font_size=sp(12),
+                                   color=(1, 0.6, 0.6, 1)))
+
+        lab = Label(text=message, size_hint_y=None, font_size=sp(13), color=POPUP_TEXT_C,
+                    halign="left", valign="top")
+        lab.bind(width=lambda w, *_: setattr(w, "text_size", (w.width, None)))
+        lab.bind(texture_size=lambda w, *_: setattr(w, "height", w.texture_size[1]))
+        inner.add_widget(lab)
+        sv.add_widget(inner)
+        box.add_widget(sv)
+
+        bar = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
+        b_close = Button(text="关闭", size_hint_x=0.42, font_size=sp(14),
+                         background_color=BTN_NEUTRAL_C, color=(1, 1, 1, 1))
+        bar.add_widget(b_close)
+        for txt, cb in (extra or []):
+            b = Button(text=txt, font_size=sp(14), background_color=C_INFO, color=(1, 1, 1, 1))
+            b.bind(on_release=lambda inst, f=cb: f())
+            bar.add_widget(b)
+        box.add_widget(bar)
+
+        body_h = img_h + text_lines_h(message, sp(13), avail_w, min_h=dp(60)) + dp(26)
+        pop_h = min(max(dp(360), body_h + dp(46) + dp(86)), Window.height * 0.94)
+        p = Popup(title=title, title_size=sp(16), content=box,
+                  size_hint=(0.94, None), height=pop_h, auto_dismiss=True)
+        b_close.bind(on_release=lambda *_: p.dismiss())
+        p.open()
+        return p
+
+    def open_contact(self, *a):
+        """联系作者：微信名片二维码 + 手机号（可复制）"""
+        msg = ("扫上面的二维码加作者微信（手机号同号）。\n"
+               "付款后请把「升级付费版」页的【设备码】发我，我回你激活码。\n"
+               "使用问题、功能建议，也欢迎直接找我。\n\n"
+               "手机号 / 微信号：%s" % CONTACT)
+        return self.show_qr_popup("联系作者", QR_CARD_IMG, msg,
+                                  extra=[("复制手机号", lambda: self.copy_text(
+                                      CONTACT, "手机号已复制：%s" % CONTACT))])
+
+    def need_paid(self, what="该功能"):
+        """付费闸门：已解锁返回 True；未解锁弹升级引导并返回 False"""
+        try:
+            if self.store.paid:
+                return True
+        except Exception:
+            return True
+        confirm_popup(
+            "升级付费版",
+            "「%s」是付费版功能。\n\n"
+            "免费版可用：房屋管理、租客登记、收租记账、水电记录、搜索、统计查看。\n\n"
+            "升级后解锁：\n"
+            "  · 导出 / 导入数据备份\n"
+            "  · 导出租客名单（Excel 可直接打开）\n"
+            "  · 导出统计报表（按月 / 按年）\n"
+            "  · 房间详情导出为 TXT\n"
+            "  · 首页到期提醒的完整明细\n\n"
+            "付费一次，长期使用。" % what,
+            lambda: self.open_support(), yes_text="去升级")
+        return False
+
+    def _upgrade_row(self, text):
+        """首页/列表里提示升级的可点条目"""
+        b = Button(text="■ %s  →  点此升级" % text, size_hint_y=None, height=dp(42),
+                   font_size=sp(13), background_color=(0.85, 0.72, 0.35, 1),
+                   color=(1, 1, 1, 1))
+        b.bind(on_release=lambda *_: self.open_support())
+        return b
+
+    def open_support(self, *a):
+        """升级 / 支持作者：收款码 + 设备码 + 激活码输入"""
+        from kivy.uix.image import Image
+        self.store.lic_load()
+        paid = self.store.paid
+        dev = lic_fmt(self.store.device_id or "")
+
+        box = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
+        sv = ScrollView(do_scroll_x=False)
+        inner = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(10))
+        inner.bind(minimum_height=inner.setter("height"))
+
+        # 状态条
+        st = Label(text=("★ 付费版已解锁，感谢支持！" if paid else "当前为免费版"),
+                   size_hint_y=None, height=dp(32), font_size=sp(15),
+                   color=(0.55, 0.95, 0.65, 1) if paid else (1, 0.85, 0.5, 1),
+                   halign="center", valign="middle")
+        st.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
+        inner.add_widget(st)
+
+        # 收款码
+        avail_w = Window.width * 0.94 - dp(24)
+        iw, ih = self._img_size(QR_PAY_IMG)
+        # 收款码最多 0.40 屏高，把剩下的空间留给说明文字和激活输入框
+        img_h = min(avail_w * ih / float(iw), Window.height * 0.40) if (iw and ih) else dp(280)
+        if os.path.exists(QR_PAY_IMG):
+            inner.add_widget(Image(source=QR_PAY_IMG, size_hint=(1, None), height=img_h,
+                                   fit_mode="contain"))
+        else:
+            inner.add_widget(Label(text="（收款码图片缺失：%s）" % QR_PAY_IMG,
+                                   size_hint_y=None, height=dp(40), font_size=sp(12),
+                                   color=(1, 0.6, 0.6, 1)))
+
+        tips = ("扫码付款 ￥%s 支持作者，解锁以下高级功能：\n"
+                "  · 导出 / 导入数据备份\n"
+                "  · 导出租客名单（Excel 直接打开）\n"
+                "  · 导出统计报表（按月 / 按年）\n"
+                "  · 房间详情导出为 TXT\n"
+                "  · 首页到期提醒显示完整明细\n\n"
+                "【本机设备码】 %s\n"
+                "① 点下面的「复制授权申请」，整段发到作者微信；\n"
+                "② 作者回你一串激活码，粘到最下面的输入框；\n"
+                "③ 点「激活」即永久解锁。"
+                % (PRICE_TEXT, dev))
+        lab = Label(text=tips, size_hint_y=None, font_size=sp(12.5), color=POPUP_TEXT_C,
+                    halign="left", valign="top")
+        lab.bind(width=lambda w, *_: setattr(w, "text_size", (w.width, None)))
+        lab.bind(texture_size=lambda w, *_: setattr(w, "height", w.texture_size[1]))
+        inner.add_widget(lab)
+
+        # 一键复制整段授权申请：客户只要粘贴发微信，不用自己整理设备码
+        def _copy_request(*_):
+            txt = LIC.make_request(self.store.device_id or "")
+            self.copy_text(txt, "授权申请已复制，粘贴发给作者即可")
+
+        b_req = Button(text="复制授权申请（整段发给作者）", size_hint_y=None, height=dp(44),
+                       font_size=sp(14), background_color=(0.36, 0.62, 0.36, 1),
+                       color=(1, 1, 1, 1))
+        b_req.bind(on_release=_copy_request)
+        inner.add_widget(b_req)
+
+        sv.add_widget(inner)
+        box.add_widget(sv)
+
+        # 激活码输入框固定在底部（不放进 ScrollView）——
+        # 否则说明文字一长，输入框就被滚出可视区，用户根本找不到该往哪填。
+        ti = None
+        if not paid:
+            ti = mk_input("粘贴激活码（BZP- 开头，共 8 段）", "")
+            ti.size_hint_y = None
+            ti.height = dp(46)
+            box.add_widget(ti)
+
+        bar = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
+        b_close = Button(text="关闭", font_size=sp(14), background_color=BTN_NEUTRAL_C,
+                         color=(1, 1, 1, 1))
+        b_con = Button(text="联系作者", font_size=sp(14), background_color=C_INFO,
+                       color=(1, 1, 1, 1))
+        b_act = Button(text=("已解锁" if paid else "激活"), font_size=sp(15),
+                       background_color=(0.42, 0.47, 0.45, 1) if paid else C_ACCENT,
+                       color=(1, 1, 1, 1))
+        bar.add_widget(b_close)
+        bar.add_widget(b_con)
+        bar.add_widget(b_act)
+        box.add_widget(bar)
+
+        # 高度按内容算，别写死 0.92 屏：短文案留一大片空白，长文案又把输入框挤出去
+        body_h = (img_h + text_lines_h(tips, sp(12.5), avail_w - dp(8), min_h=dp(120))
+                  + dp(44) + dp(22))
+        extra = 0 if paid else dp(46)
+        pop_h = min(max(dp(440), body_h + dp(46) + extra + dp(74)), Window.height * 0.95)
+        p = Popup(title="升级付费版 / 支持作者", title_size=sp(16), content=box,
+                  size_hint=(0.94, None), height=pop_h, auto_dismiss=False)
+        b_close.bind(on_release=lambda *_: p.dismiss())
+
+        def do_contact(*_):
+            p.dismiss()
+            Clock.schedule_once(lambda *_: self.open_contact(), 0.25)
+
+        def do_activate(*_):
+            if paid:
+                self.toast("已经是付费版了，感谢支持！")
+                return
+            txt = (ti.text or "").strip() if ti else ""
+            if not txt:
+                self.toast("请先填写激活码")
+                return
+            if self.store.try_activate(txt):
+                p.dismiss()
+                self.refresh_mine()
+                self.build_home()
+                # 等升级弹窗收完动画再弹成功提示，两个 Popup 叠在一起会闪一下
+                Clock.schedule_once(lambda *_: info_popup(
+                    "激活成功",
+                    "付费版已解锁，感谢支持！\n\n"
+                    "现在可以：导出 / 导入数据备份、导出租客名单、\n"
+                    "导出统计报表、导出房间详情、查看全部到期提醒。\n\n"
+                    "本机设备码：%s" % dev), 0.3)
+            else:
+                why = self.store.activate_reason(txt)
+                self.toast("激活失败：%s" % why)
+
+        b_con.bind(on_release=do_contact)
+        b_act.bind(on_release=do_activate)
+        p.open()
+        return p
 
     # ------------------------------------------------------------------ 我的
     def refresh_mine(self):
@@ -1275,8 +3534,23 @@ class BaozupoApp(App):
         self.store.load()
         scr = self.sm.get_screen("mine")
         scr.ids.count.text = "登录账号：%s" % (self.login_user or "-")
-        scr.ids.info.text = ("%s v%s\n数据文件：%s\n字体：%s" % (
-            APP_NAME, VERSION, DATA_FILE, FONT_PATH or "未找到中文字体"))
+        # 授权状态：按钮文案 + 一行说明（对应 baozupo.kv <MineScreen> 里的 id）
+        paid = self.store.paid
+        try:
+            scr.ids.btn_support.text = ("★ 已解锁付费版 · 点击查看"
+                                        if paid else "★ 升级付费版 / 支持作者")
+        except Exception:
+            pass
+        try:
+            scr.ids.license.text = (
+                "★ 付费版已激活（设备码 %s）" % lic_fmt(self.store.device_id)
+                if paid else
+                "免费版 · 记账 / 收租 / 水电 / 搜索 / 统计查看均免费，导出备份与到期提醒明细需解锁")
+        except Exception:
+            pass
+        # 数据文件路径统一只在「关于」里显示（见 about()）
+        scr.ids.info.text = ("%s v%s\n字体：%s" % (
+            APP_NAME, VERSION, FONT_PATH or "未找到中文字体"))
 
     def open_warn_setting(self, tenant=None):
         sett = self.store.settings
@@ -1336,6 +3610,9 @@ class BaozupoApp(App):
 
     # ------------------------------------------------------------------ 备份 / 恢复
     def open_backup_menu(self, *a):
+        # 数据备份 / 导入 / 复制到剪贴板 整体属于付费功能
+        if not self.need_paid("数据备份 / 导入"):
+            return
         box = BoxLayout(orientation="vertical", spacing=dp(6), padding=dp(8))
         p = Popup(title="数据备份 / 导入", title_size=sp(16), size_hint=(0.9, 0.72),
                   auto_dismiss=True)
@@ -1471,23 +3748,81 @@ class BaozupoApp(App):
                                  "此操作不可撤销！", yes, yes_text="确认清空", danger=True)
 
     def about(self):
-        info_popup("关于", "%s\n版本 v%s\n作者 %s\n联系方式 %s\n\n"
-                           "· 电脑版与手机版数据格式完全通用，可互相导入导出\n"
-                           "· 数据保存在手机应用私有目录，卸载 App 会一并删除\n"
-                           "· 建议定期「导出备份」并把文件传到电脑留档"
-                           % (APP_NAME, VERSION, AUTHOR, CONTACT))
+        paid = self.store.paid
+        msg = ("%s\n版本 v%s\n作者 %s\n联系方式 %s\n\n"
+               "· 电脑版与手机版数据格式完全通用，可互相导入导出\n"
+               "· 数据保存在手机应用私有目录，卸载 App 会一并删除\n"
+               "· 建议定期「导出备份」并把文件传到电脑留档\n\n"
+               "【授权状态】%s\n"
+               "【设备码】%s\n"
+               "【数据文件位置】\n%s\n\n"
+               "扫上面的二维码即可加作者微信（手机号同号）：\n"
+               "付款解锁、使用问题、功能建议，都直接找我。"
+               % (APP_NAME, VERSION, AUTHOR, CONTACT,
+                  ("付费版已激活 ★" if paid else "免费版（导出备份 / 到期提醒明细需解锁）"),
+                  lic_fmt(self.store.device_id or ""), DATA_FILE))
+        return self.show_qr_popup("关于 / 联系作者", QR_CARD_IMG, msg,
+                                  extra=[("复制手机号", lambda: self.copy_text(
+                                      CONTACT, "手机号已复制：%s" % CONTACT))])
 
     # ------------------------------------------------------------------ 异常兜底
     def handle_exception(self, inst, exc):
         try:
+            tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+            _diag_report("X 运行期异常（Kivy 捕获）", type(exc).__name__)
+            _diag_write(tb)
+            _diag_clip("【包租婆崩溃】%s\n\n%s" % (type(exc).__name__, tb[:1500]))
             with open(os.path.join(app_data_dir(), "error.log"), "a", encoding="utf-8") as f:
-                f.write("\n=== %s ===\n%s\n" % (now_str(), "".join(
-                    traceback.format_exception(type(exc), exc, exc.__traceback__))))
+                f.write("\n=== %s ===\n%s\n" % (now_str(), tb))
         except Exception:
             pass
         return False
 
 
 # ==============================================================================
+# 【诊断引导块 C】崩溃逃生界面：即使主程序起不来，也让错误看得见
+# ==============================================================================
+def _diag_show_crash(text):
+    """用最小代价的 Kivy 界面显示错误（可由用户长按复制 / 截图）"""
+    _diag_clip("【包租婆崩溃】\n" + text[-1500:])
+    try:
+        from kivy.base import runTouchApp
+        from kivy.uix.scrollview import ScrollView
+        from kivy.uix.textinput import TextInput
+        from kivy.core.text import LabelBase
+
+        try:
+            if FONT_PATH:
+                LabelBase.register(name="DiagFont", fn_regular=FONT_PATH)
+        except Exception:
+            pass
+
+        ti = TextInput(text=text[-6000:], readonly=True, font_size=sp(11))
+        try:
+            if FONT_PATH:
+                ti.font_name = "DiagFont"
+        except Exception:
+            pass
+        sv = ScrollView()
+        sv.add_widget(ti)
+        runTouchApp(sv)
+    except Exception as e2:
+        _diag_write("崩溃界面也起不来: %r" % (e2,))
+
+
 if __name__ == "__main__":
-    BaozupoApp().run()
+    _diag_report("S8 准备启动主程序")
+    try:
+        BaozupoApp().run()
+        _diag_report("S9 主程序正常退出")
+    except BaseException as e:
+        tb = traceback.format_exc()
+        try:
+            _diag_write("!!! 启动失败: %s" % tb)
+            _diag_report("S9 主程序异常退出", type(e).__name__)
+        except Exception:
+            pass
+        _diag_show_crash(
+            "包租婆 %s 启动失败\n\n阶段: %s\n\n%s\n\n日志文件:\n%s\n\n"
+            "请把本页截图，或长按复制内容发给开发者。"
+            % (DIAG_VERSION, _DIAG_STAGE, tb, "\n".join(_DIAG_FILES) or "（无法写入任何文件）"))

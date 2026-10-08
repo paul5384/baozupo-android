@@ -15,10 +15,10 @@ source.dir = .
 source.include_exts = py,kv,png,jpg,jpeg,ttf,json,atlas,ico
 source.include_patterns = fonts/*,assets/*
 
-version = 2.1.0
+version = 2.1.6
 
 # kivy 是必须的；不加多余依赖，打包最不容易失败
-requirements = python3,kivy
+requirements = hostpython3==3.11.9,python3==3.11.9,kivy
 
 orientation = portrait
 fullscreen = 0
@@ -33,8 +33,9 @@ presplash.color = #2F4F4F
 #   配合 READ/WRITE_EXTERNAL_STORAGE 权限，APK 才能直接读写手机里的
 #   /sdcard/Download 目录，从而「导出备份 → 传到电脑 → 电脑版导入」。
 #   如果你要上架 Google Play，需要把 android.api 提到 34 并改用应用私有目录。
-android.api = 29
+android.api = 34
 android.minapi = 24
+android.accept_license = yes
 android.ndk = 25b
 
 # 使用本机已下载好的 SDK / NDK / JDK，避免 buildozer 联网重复下载
@@ -47,7 +48,12 @@ android.archs = arm64-v8a
 # 避免 p4a 给 APK 强塞 requests/charset-normalizer 等（2026-09 其 android wheel
 # 会触发 pip "not a supported wheel on this platform" 构建失败）
 p4a.local_recipes = ./recipes
-android.permissions = READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE, INTERNET
+# CAMERA   ：扫码抄表（智能水电表扫表上的二维码 / 条码）
+# CALL_PHONE：租客电话直拨（没授予时自动退化为打开拨号盘）
+android.permissions = READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE, INTERNET, CAMERA, CALL_PHONE
+
+# 扫码用的解码库（纯 Java，不带 native so，不会拖慢打包）
+android.gradle_dependencies = com.google.zxing:core:3.5.3
 
 android.allow_backup = True
 android.accept_sdk_license = True
