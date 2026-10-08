@@ -20,29 +20,31 @@ jobs:
       - name: 拉取代码
         uses: actions/checkout@v4
 
-      # ==== 签名 keystore ====
-      # buildozer debug 出来的 APK 是【未签名】的，手机会直接拒绝安装。
-      # keystore 不能提交进公开仓库，所以用 Actions cache 持久化：
-      #   首次 keytool 生成 → post 阶段存入 cache → 之后每次 restore 同一份证书，
-      #   这样各版本签名一致，用户可以覆盖升级而不用卸载重装。
-      - name: 恢复签名 keystore
-        uses: actions/cache@v4
-        with:
-          path: .signing
-          key: baozupo-signing-keystore-v1
-
-      - name: 若无则生成 keystore
+      # ==== 签名 keystore（永久固定，绝不重新生成）====
+      # ⚠️ 事故 2026-10-08：早期用 actions/cache 存 keystore。仓库缓存总量涨到
+      # ~10.4GB 超过 GitHub 免费额度上限，GitHub 按 LRU 把 keystore 缓存淘汰了，
+      # CI 于是静默重新生成了一把新密钥 → 用户手机上装的旧版证书对不上 →
+      # 新包直接装不上（报「缺少证书 / 签名不一致」），只能卸载重装。
+      # 现在改为从仓库 Secret 恢复（Secret 不会过期/不会淘汰），并硬校验哈希；
+      # Secret 缺失或指纹变化就让构建失败 —— 宁可不出包，也不出"换过钥匙"的包。
+      - name: 恢复签名 keystore（仓库 Secret，永久）
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KS_SHA: ${{ secrets.ANDROID_KEYSTORE_SHA256 }}
         run: |
           set -e
           mkdir -p .signing
-          if [ ! -f .signing/app.keystore ]; then
-            echo "首次运行：生成 keystore"
-            keytool -genkeypair -v -keystore .signing/app.keystore -storetype PKCS12 \
-              -storepass baozupo2026 -keypass baozupo2026 -alias baozupo \
-              -keyalg RSA -keysize 2048 -validity 18250 \
-              -dname "CN=Baozupo App, OU=Rental, O=Baozupo, L=Guangzhou, ST=GD, C=CN"
-          else
-            echo "复用已缓存 keystore"
+          if [ -z "$KS_B64" ]; then
+            echo "::error::缺少 Secret ANDROID_KEYSTORE_B64，拒绝继续（防止重新生成密钥让用户装不上）"
+            exit 1
+          fi
+          printf '%s' "$KS_B64" | base64 -d > .signing/app.keystore
+          GOT=$(sha256sum .signing/app.keystore | cut -d' ' -f1)
+          WANT="$KS_SHA"
+          echo "keystore sha256 = $GOT"
+          if [ -n "$WANT" ] && [ "$GOT" != "$WANT" ]; then
+            echo "::error::keystore 内容与约定不符（期望 $WANT），拒绝出包"
+            exit 1
           fi
           keytool -list -v -keystore .signing/app.keystore -storepass baozupo2026 \
             -alias baozupo | grep -E 'SHA1:|SHA256:' || true
