@@ -1,0 +1,13 @@
+name: SIGT05
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+jobs:
+  t:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "aGk=" | base64 -d > /tmp/x
+          GOT=$(sha256sum /tmp/x | cut -d' ' -f1)
+          echo "$GOT"

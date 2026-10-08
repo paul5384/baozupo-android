@@ -1,0 +1,12 @@
+name: SIGT01
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+jobs:
+  t:
+    runs-on: ubuntu-latest
+    steps:
+      - name: inline secret
+        run: |
+          echo "b64=${{ secrets.ANDROID_KEYSTORE_B64 }}"

@@ -1,0 +1,12 @@
+name: SIGT02
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+jobs:
+  t:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          A=1
+          if [ -n "$A" ] && [ "$A" != "2" ]; then echo ok; fi
