@@ -2833,16 +2833,19 @@ class BaozupoApp(App):
             tex = getattr(cam, "texture", None)
             if tex is None:
                 return
+            # FBO / 纹理读取是 GL 调用，只能在 Kivy 主线程做；
+            # 后台线程只负责把拿到的像素喂给 ZXing（JNI 慢，不占界面）
+            got = android_bridge.grab_texture_pixels(tex)
+            if not got:
+                return
+            px, pw, ph = got
             state["busy"] = True
 
             def work():
-                # 解码走 JNI，比较重，丢到后台线程里跑，别卡住界面
                 try:
-                    got = android_bridge.grab_texture_pixels(tex)
-                    if got:
-                        txt = android_bridge.decode_rgba(got[0], got[1], got[2])
-                        if txt:
-                            Clock.schedule_once(lambda *_: finish(txt), 0)
+                    txt = android_bridge.decode_rgba(px, pw, ph)
+                    if txt:
+                        Clock.schedule_once(lambda *_: finish(txt), 0)
                 except Exception:
                     pass
                 finally:
